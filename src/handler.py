@@ -376,16 +376,73 @@ def handler(event):
         
         if operation == "train":
             # Process training request
-            data = input_data.get("data")
-            params = input_data.get("params", {})
-            result = train_model(data, params)
-            return result
+            serialized_data = input_data.get("data", {})
+            
+            # Check if we need to deserialize the dataset
+            if isinstance(serialized_data, dict) and "dataset" in serialized_data:
+                # Extract dataset and parameters
+                dataset_data = serialized_data.get("dataset", {})
+                target_column = serialized_data.get("target_column", "is_threat")
+                params = serialized_data.get("params", {})
+                
+                # Deserialize the dataset if needed
+                if isinstance(dataset_data, dict) and "type" in dataset_data and dataset_data["type"] == "dataframe":
+                    logger.info("Deserializing DataFrame from serialized data")
+                    try:
+                        if dataset_data.get("format") == "parquet":
+                            # Deserialize from parquet
+                            binary_data = base64.b64decode(dataset_data["data"])
+                            buffer = io.BytesIO(binary_data)
+                            df = pd.read_parquet(buffer)
+                        else:
+                            # Deserialize from pickle
+                            binary_data = base64.b64decode(dataset_data["data"])
+                            df = pickle.loads(binary_data)
+                        
+                        logger.info(f"Successfully deserialized DataFrame with shape {df.shape}")
+                    except Exception as e:
+                        logger.error(f"Error deserializing DataFrame: {e}")
+                        return {"error": f"Failed to deserialize DataFrame: {str(e)}"}
+                else:
+                    logger.error("Invalid dataset format in request")
+                    return {"error": "Invalid dataset format in request"}
+                
+                # Train the model with the deserialized DataFrame
+                result = train_model(df, params)
+                return result
+            else:
+                logger.error("Missing dataset in request data")
+                return {"error": "Missing dataset in request data"}
         
         elif operation == "predict":
             # Process prediction request
+            serialized_data = input_data.get("data", {})
             model_data = input_data.get("model")
-            data = input_data.get("data")
-            predictions = predict(model_data, data)
+            
+            # Deserialize the dataset if needed
+            if isinstance(serialized_data, dict) and "type" in serialized_data and serialized_data["type"] == "dataframe":
+                logger.info("Deserializing DataFrame for prediction")
+                try:
+                    if serialized_data.get("format") == "parquet":
+                        # Deserialize from parquet
+                        binary_data = base64.b64decode(serialized_data["data"])
+                        buffer = io.BytesIO(binary_data)
+                        df = pd.read_parquet(buffer)
+                    else:
+                        # Deserialize from pickle
+                        binary_data = base64.b64decode(serialized_data["data"])
+                        df = pickle.loads(binary_data)
+                    
+                    logger.info(f"Successfully deserialized prediction DataFrame with shape {df.shape}")
+                except Exception as e:
+                    logger.error(f"Error deserializing prediction DataFrame: {e}")
+                    return {"error": f"Failed to deserialize prediction DataFrame: {str(e)}"}
+            else:
+                logger.error("Invalid dataset format in prediction request")
+                return {"error": "Invalid dataset format in prediction request"}
+            
+            # Make predictions with the deserialized DataFrame
+            predictions = predict(model_data, df)
             return predictions
         
         elif operation == "test":
@@ -397,7 +454,7 @@ def handler(event):
             return {"error": f"Unknown operation: {operation}"}
     
     except Exception as e:
-        logger.error(f"Error processing request: {str(e)}")
+        logger.error(f"Error in handler: {str(e)}")
         import traceback
         logger.error(traceback.format_exc())
         return {"error": str(e)}
