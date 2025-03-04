@@ -24,6 +24,7 @@ wheels/
 venv/
 env/
 ENV/
+.venv/
 
 # IDE
 .idea/
@@ -45,3 +46,7 @@ models/
 # OS specific
 .DS_Store
 Thumbs.db 
+
+# SSH and deployment files
+eval*
+deploy_runpod.sh 
