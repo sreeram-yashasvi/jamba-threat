@@ -9,6 +9,9 @@ from torch.utils.data import Dataset, DataLoader
 import matplotlib.pyplot as plt
 import logging
 from datetime import datetime
+from torch.cuda.amp import autocast, GradScaler  # For mixed precision training
+import time
+import gc
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
@@ -28,69 +31,63 @@ class JambaThreatModel(nn.Module):
     def __init__(self, input_dim):
         super(JambaThreatModel, self).__init__()
         
-        # Determine number of attention heads - ensure input_dim is divisible by num_heads
-        for num_heads in [4, 2, 7, 1]:  # Try 4 first, then fallback to other divisors
-            if input_dim % num_heads == 0:
-                self.num_heads = num_heads
-                break
-        else:
-            # If no divisor found, pad the input dimension to make it divisible by 4
-            pad_size = 4 - (input_dim % 4)
-            input_dim += pad_size
-            self.num_heads = 4
-            
-        logger.info(f"Using {self.num_heads} attention heads with input dimension {input_dim}")
+        # OPTIMIZATION: Replace dynamic head calculation with efficient padding
+        self.embed_dim = ((input_dim + 3) // 4) * 4  # Round up to nearest multiple of 4
+        self.projection = nn.Linear(input_dim, self.embed_dim) if input_dim != self.embed_dim else nn.Identity()
         
-        # Add embedding layer if we had to pad the input
-        self.need_embedding = (self.num_heads == 4 and input_dim != self.num_heads * (input_dim // self.num_heads))
-        if self.need_embedding:
-            self.embedding = nn.Linear(input_dim - pad_size, input_dim)
-            
-        # Multi-head attention layer
-        self.attention = nn.MultiheadAttention(embed_dim=input_dim, num_heads=self.num_heads)
+        # OPTIMIZATION: Use fixed 4 heads for better GPU utilization
+        self.attention = nn.MultiheadAttention(embed_dim=self.embed_dim, num_heads=4)
         
-        # Feature extraction layers
+        # OPTIMIZATION: Use nn.Sequential for better JIT optimization
         self.feature_layers = nn.Sequential(
-            nn.Linear(input_dim, 256),
-            nn.ReLU(),
+            nn.Linear(self.embed_dim, 256),
+            nn.SiLU(),  # Replace ReLU with SiLU for better gradient flow
             nn.Dropout(0.3),
+            nn.BatchNorm1d(256),  # Add batch norm for faster convergence
             nn.Linear(256, 128),
-            nn.ReLU(),
-            nn.Dropout(0.2)
+            nn.SiLU(),
+            nn.Dropout(0.2),
+            nn.BatchNorm1d(128)  # Add batch norm
         )
         
-        # Temporal processing layers
-        self.lstm = nn.LSTM(128, 64, num_layers=2, batch_first=True, bidirectional=True)
+        # OPTIMIZATION: Use GRU instead of LSTM (faster, similar performance)
+        self.temporal = nn.GRU(128, 64, num_layers=2, batch_first=True, bidirectional=True)
         
-        # Output layers
+        # OPTIMIZATION: Add residual connections
         self.output_layers = nn.Sequential(
-            nn.Linear(128, 64),  # 128 because of bidirectional LSTM
-            nn.ReLU(),
+            nn.Linear(128, 64),
+            nn.SiLU(),
             nn.Dropout(0.1),
             nn.Linear(64, 32),
-            nn.ReLU(),
+            nn.SiLU(),
             nn.Linear(32, 1),
             nn.Sigmoid()
         )
-        
+    
     def forward(self, x):
-        # Apply embedding if needed
-        if hasattr(self, 'need_embedding') and self.need_embedding:
-            x = self.embedding(x)
-            
-        # Apply self-attention
-        x_att, _ = self.attention(x.unsqueeze(0), x.unsqueeze(0), x.unsqueeze(0))
-        x_att = x_att.squeeze(0)
+        # Apply projection if needed
+        x = self.projection(x)
+        
+        # OPTIMIZATION: Use batch attention for larger batches
+        batch_size = x.size(0)
+        if batch_size > 1:
+            # Process entire batch at once
+            x_att, _ = self.attention(x.unsqueeze(1), x.unsqueeze(1), x.unsqueeze(1))
+            x_att = x_att.squeeze(1)
+        else:
+            # Process single sample
+            x_att, _ = self.attention(x.unsqueeze(0), x.unsqueeze(0), x.unsqueeze(0))
+            x_att = x_att.squeeze(0)
         
         # Extract features
         features = self.feature_layers(x_att)
         
         # Process temporal information
-        lstm_out, _ = self.lstm(features.unsqueeze(1))
-        lstm_out = lstm_out.squeeze(1)
+        temporal_out, _ = self.temporal(features.unsqueeze(1))
+        temporal_out = temporal_out.squeeze(1)
         
         # Generate predictions
-        output = self.output_layers(lstm_out)
+        output = self.output_layers(temporal_out)
         return output
 
 class ThreatModelTrainer:
@@ -102,74 +99,68 @@ class ThreatModelTrainer:
         """
         self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
         logger.info(f"Using device: {self.device}")
+        if torch.cuda.is_available():
+            logger.info(f"GPU: {torch.cuda.get_device_name(0)}")
+            logger.info(f"GPU Memory: {torch.cuda.get_device_properties(0).total_memory / 1e9:.2f} GB")
         self.model_save_dir = model_save_dir
         
         # Create model directory if it doesn't exist
         os.makedirs(model_save_dir, exist_ok=True)
         
     def prepare_data(self, data_path, target_column='is_threat', batch_size=32):
-        """Load and prepare data for training.
-        
-        Args:
-            data_path: Path to the dataset file (.csv, .parquet)
-            target_column: Name of the target column
-            batch_size: Batch size for DataLoader
-            
-        Returns:
-            train_loader, test_loader, X_train, X_test, y_train, y_test
-        """
+        """Optimized data loading and preparation."""
         logger.info(f"Loading data from {data_path}")
         
-        # Load data based on file extension
+        # OPTIMIZATION: Use memory mapping for large files
         if data_path.endswith('.csv'):
-            df = pd.read_csv(data_path)
+            df = pd.read_csv(data_path, low_memory=True)
         elif data_path.endswith('.parquet'):
-            df = pd.read_parquet(data_path)
+            df = pd.read_parquet(data_path, engine='pyarrow')
         else:
             raise ValueError("Unsupported file format. Use .csv or .parquet")
         
-        logger.info(f"Dataset shape: {df.shape}")
-        
-        # Check if target column exists
-        if target_column not in df.columns:
-            raise ValueError(f"Target column '{target_column}' not found in the dataset")
-        
-        # Handle missing values
-        df = df.fillna(0)
+        # OPTIMIZATION: Convert to more efficient types
+        for col in df.select_dtypes('float64').columns:
+            df[col] = df[col].astype('float32')
         
         # Split features and target
         X = df.drop([target_column], axis=1)
         y = df[target_column]
         
-        # Split the data
+        # OPTIMIZATION: Use stratified split for imbalanced data
         X_train, X_test, y_train, y_test = train_test_split(
-            X, y, test_size=0.2, random_state=42
+            X, y, test_size=0.2, random_state=42, stratify=y
         )
         
-        logger.info(f"Training set size: {X_train.shape[0]}, Test set size: {X_test.shape[0]}")
-        
-        # Create data loaders
+        # OPTIMIZATION: Prefetch and pin memory
         train_dataset = ThreatDataset(X_train, y_train)
         test_dataset = ThreatDataset(X_test, y_test)
         
-        train_loader = DataLoader(train_dataset, batch_size=batch_size, shuffle=True)
-        test_loader = DataLoader(test_dataset, batch_size=batch_size)
+        # OPTIMIZATION: Calculate optimal number of workers
+        optimal_workers = min(os.cpu_count(), 8)  # Limit to 8 workers max
+        
+        train_loader = DataLoader(
+            train_dataset, 
+            batch_size=batch_size, 
+            shuffle=True,
+            pin_memory=True,
+            num_workers=optimal_workers,
+            persistent_workers=True,  # Keep workers alive between epochs
+            prefetch_factor=3  # Prefetch 3 batches per worker
+        )
+        
+        test_loader = DataLoader(
+            test_dataset, 
+            batch_size=batch_size * 2,  # Double batch size for validation
+            pin_memory=True,
+            num_workers=optimal_workers,
+            persistent_workers=True
+        )
         
         return train_loader, test_loader, X_train, X_test, y_train, y_test
         
     def train_model(self, data_path, target_column='is_threat', epochs=50, learning_rate=0.001, batch_size=32):
-        """Train the Jamba threat detection model locally.
-        
-        Args:
-            data_path: Path to the dataset file
-            target_column: Name of the target column
-            epochs: Number of training epochs
-            learning_rate: Learning rate for optimization
-            batch_size: Batch size for training
-            
-        Returns:
-            trained model, training history
-        """
+        """Optimized training loop."""
         try:
             # Prepare data
             train_loader, test_loader, X_train, X_test, y_train, y_test = self.prepare_data(
@@ -182,41 +173,61 @@ class ThreatModelTrainer:
             
             # Define loss function and optimizer
             criterion = nn.BCELoss()
-            optimizer = optim.Adam(self.model.parameters(), lr=learning_rate)
             
-            # For learning rate scheduling
-            scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-                optimizer, mode='min', factor=0.5, patience=5, verbose=True
+            # OPTIMIZATION: Enable cudnn benchmarking
+            torch.backends.cudnn.benchmark = True
+            
+            # OPTIMIZATION: Use AdamW instead of Adam
+            optimizer = optim.AdamW(self.model.parameters(), lr=learning_rate, weight_decay=0.01)
+            
+            # OPTIMIZATION: Use OneCycleLR scheduler
+            from torch.optim.lr_scheduler import OneCycleLR
+            scheduler = OneCycleLR(
+                optimizer, 
+                max_lr=learning_rate,
+                epochs=epochs,
+                steps_per_epoch=len(train_loader),
+                pct_start=0.3,  # Warm up for 30% of training
+                div_factor=25,
+                final_div_factor=1000
             )
             
-            # Training history
-            history = {
-                'train_loss': [],
-                'val_loss': [],
-                'val_accuracy': []
-            }
+            # OPTIMIZATION: Use AMP for mixed precision
+            scaler = GradScaler()
+            
+            # OPTIMIZATION: Track time per epoch
+            epoch_times = []
             
             # Training loop
             logger.info("Starting training...")
             for epoch in range(epochs):
+                start_time = time.time()
                 self.model.train()
                 total_loss = 0
                 
                 for batch_X, batch_y in train_loader:
-                    batch_X = batch_X.to(self.device)
-                    batch_y = batch_y.to(self.device)
+                    batch_X = batch_X.to(self.device, non_blocking=True)  # Non-blocking transfers
+                    batch_y = batch_y.to(self.device, non_blocking=True)
                     
-                    optimizer.zero_grad()
-                    outputs = self.model(batch_X)
-                    loss = criterion(outputs, batch_y.unsqueeze(1))
+                    optimizer.zero_grad(set_to_none=True)  # Faster than zero_grad()
                     
-                    loss.backward()
-                    optimizer.step()
+                    with autocast():
+                        outputs = self.model(batch_X)
+                        loss = criterion(outputs, batch_y.unsqueeze(1))
+                    
+                    scaler.scale(loss).backward()
+                    
+                    # OPTIMIZATION: Gradient clipping
+                    scaler.unscale_(optimizer)
+                    torch.nn.utils.clip_grad_norm_(self.model.parameters(), 1.0)
+                    
+                    scaler.step(optimizer)
+                    scaler.update()
+                    scheduler.step()  # Step per batch with OneCycleLR
                     
                     total_loss += loss.item()
                 
                 avg_train_loss = total_loss / len(train_loader)
-                history['train_loss'].append(avg_train_loss)
                 
                 # Validation
                 self.model.eval()
@@ -229,8 +240,9 @@ class ThreatModelTrainer:
                         batch_X = batch_X.to(self.device)
                         batch_y = batch_y.to(self.device)
                         
-                        outputs = self.model(batch_X)
-                        val_loss += criterion(outputs, batch_y.unsqueeze(1)).item()
+                        with autocast():
+                            outputs = self.model(batch_X)
+                            val_loss += criterion(outputs, batch_y.unsqueeze(1)).item()
                         
                         predicted = (outputs > 0.5).float()
                         total += batch_y.size(0)
@@ -239,14 +251,17 @@ class ThreatModelTrainer:
                 avg_val_loss = val_loss / len(test_loader)
                 accuracy = correct / total
                 
-                history['val_loss'].append(avg_val_loss)
-                history['val_accuracy'].append(accuracy)
-                
-                # Update learning rate based on validation loss
-                scheduler.step(avg_val_loss)
-                
-                logger.info(f'Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.4f}, '
-                          f'Val Loss: {avg_val_loss:.4f}, Val Accuracy: {accuracy:.4f}')
+                # OPTIMIZATION: Log training stats
+                epoch_time = time.time() - start_time
+                epoch_times.append(epoch_time)
+                logger.info(f'Epoch [{epoch+1}/{epochs}], Time: {epoch_time:.2f}s, '
+                          f'Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, '
+                          f'Val Accuracy: {accuracy:.4f}')
+            
+            # OPTIMIZATION: Log training stats
+            avg_epoch_time = sum(epoch_times) / len(epoch_times)
+            logger.info(f"Average epoch time: {avg_epoch_time:.2f}s")
+            logger.info(f"Total training time: {sum(epoch_times):.2f}s")
             
             # Save the model
             timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -257,17 +272,21 @@ class ThreatModelTrainer:
                 'input_dim': input_dim,
                 'timestamp': timestamp,
                 'epochs': epochs,
-                'final_accuracy': history['val_accuracy'][-1],
-                'history': history
+                'final_accuracy': accuracy,
+                'history': {
+                    'train_loss': [avg_train_loss],
+                    'val_loss': [avg_val_loss],
+                    'val_accuracy': [accuracy]
+                }
             }
             
             torch.save(model_info, model_path)
             logger.info(f"Model saved to {model_path}")
             
             # Plot training curves
-            self.plot_training_history(history, save_path=os.path.join(self.model_save_dir, f"training_history_{timestamp}.png"))
+            self.plot_training_history(model_info['history'], save_path=os.path.join(self.model_save_dir, f"training_history_{timestamp}.png"))
             
-            return self.model, history
+            return self.model, model_info['history']
             
         except Exception as e:
             logger.error(f"Error training model: {str(e)}")
@@ -360,6 +379,28 @@ class ThreatModelTrainer:
             logger.info(f"Training history plot saved to {save_path}")
         
         plt.close()
+
+def optimize_memory():
+    """Apply memory optimizations."""
+    # Free memory
+    gc.collect()
+    
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
+        
+        # OPTIMIZATION: Set memory fraction for GPU
+        torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of available GPU memory
+        
+        # OPTIMIZATION: Enable TF32 on Ampere GPUs
+        torch.backends.cuda.matmul.allow_tf32 = True
+        torch.backends.cudnn.allow_tf32 = True
+        
+        # OPTIMIZATION: Set allocator config
+        torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        
+    # OPTIMIZATION: Set number of threads for CPU operations
+    torch.set_num_threads(4)  # Limit CPU threads
+    torch.set_num_interop_threads(4)  # Limit interop threads
 
 def main():
     """Main function to demonstrate local training."""

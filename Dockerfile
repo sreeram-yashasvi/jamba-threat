@@ -1,19 +1,39 @@
-FROM python:3.9-slim
+FROM --platform=linux/amd64 pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
 
-# Set working directory
+# Install system dependencies
+RUN apt-get update && apt-get install -y \
+    build-essential \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Create app directory
 WORKDIR /app
 
-# Copy requirements and install dependencies
-COPY requirements.txt .
-RUN pip install --no-cache-dir -r requirements.txt
+# Install Python dependencies in two steps
+RUN pip install --no-cache-dir runpod==0.10.0
+RUN pip install --no-cache-dir \
+    pandas==2.0.3 \
+    scikit-learn==1.3.0 \
+    pyarrow==12.0.1 \
+    fastparquet==2023.7.0 \
+    matplotlib==3.7.1 \
+    seaborn==0.12.2 \
+    tqdm==4.65.0
 
-# Copy application code
-COPY src/ .
+# Create a Python module structure
+RUN mkdir -p /app/jamba_model
+RUN touch /app/jamba_model/__init__.py
+
+# Copy model files directly to app directory first
+COPY src/jamba_model.py /app/jamba_model/model.py
+COPY src/handler.py /app/handler.py
 
 # Set environment variables
-ENV AZURE_SUBSCRIPTION_ID=""
-ENV AZURE_RESOURCE_GROUP=""
-ENV AZURE_ML_WORKSPACE=""
+ENV NVIDIA_VISIBLE_DEVICES=all
+ENV NVIDIA_DRIVER_CAPABILITIES=compute,utility
+ENV PYTHONDONTWRITEBYTECODE=1
+ENV PYTHONUNBUFFERED=1
+ENV PYTHONPATH=/app
 
-# Run the application
-CMD ["python", "data_ingestion.py"] 
+# Set entrypoint
+ENTRYPOINT ["python", "-u", "handler.py"] 
