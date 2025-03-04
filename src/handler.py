@@ -213,19 +213,32 @@ def train_model(data, params):
     )
     
     # OPTIMIZATION: Use automatic mixed precision
-    amp_dtype = torch.float16 if torch.cuda.is_available() else torch.bfloat16
+    # In PyTorch 2.0.1, we need to be careful with dtype settings
     amp_enabled = torch.cuda.is_available()
+    scaler = amp.GradScaler(enabled=amp_enabled)
     
-    # OPTIMIZATION: JIT compile model if not training
+    # OPTIMIZATION: JIT compile model if not training on GPU
     if not amp_enabled:
         model = torch.jit.script(model)  # JIT for CPU
-    
-    scaler = amp.GradScaler(enabled=amp_enabled)
+
+    # Log training configuration
+    logger.info(f"Training on device: {device}, Mixed precision: {amp_enabled}")
+    logger.info(f"Batch size: {batch_size}, Learning rate: {learning_rate}")
     
     # OPTIMIZATION: Set cuda high water mark once
     if torch.cuda.is_available():
         torch.cuda.empty_cache()
-        torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        # This line causes errors with PyTorch 2.0.1 in the Docker container
+        # torch.cuda.memory._set_allocator_settings("expandable_segments:True")
+        
+        # Use these more compatible memory settings instead
+        torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of available GPU memory
+        logger.info(f"Set CUDA memory fraction to 0.9")
+        
+        # Report available GPU memory
+        if hasattr(torch.cuda, 'mem_get_info'):
+            free_mem, total_mem = torch.cuda.mem_get_info(0)
+            logger.info(f"GPU memory: {free_mem/1e9:.2f} GB free, {total_mem/1e9:.2f} GB total")
     
     # Training loop
     start_time = time.time()
@@ -247,14 +260,21 @@ def train_model(data, params):
             optimizer.zero_grad()
             
             # Use mixed precision training
-            with autocast():
+            if amp_enabled:
+                with autocast():
+                    outputs = model(batch_X)
+                    loss = criterion(outputs, batch_y.unsqueeze(1))
+                
+                # Scale loss and backpropagate
+                scaler.scale(loss).backward()
+                scaler.step(optimizer)
+                scaler.update()
+            else:
+                # Regular training without mixed precision
                 outputs = model(batch_X)
                 loss = criterion(outputs, batch_y.unsqueeze(1))
-            
-            # Scale loss and backpropagate
-            scaler.scale(loss).backward()
-            scaler.step(optimizer)
-            scaler.update()
+                loss.backward()
+                optimizer.step()
             
             total_loss += loss.item()
         
@@ -272,9 +292,15 @@ def train_model(data, params):
                 batch_X = batch_X.to(device)
                 batch_y = batch_y.to(device)
                 
-                with autocast():
+                if amp_enabled:
+                    with autocast():
+                        outputs = model(batch_X)
+                        loss = criterion(outputs, batch_y.unsqueeze(1))
+                else:
                     outputs = model(batch_X)
-                    val_loss += criterion(outputs, batch_y.unsqueeze(1)).item()
+                    loss = criterion(outputs, batch_y.unsqueeze(1))
+                
+                val_loss += loss.item()
                 
                 predicted = (outputs > 0.5).float()
                 total += batch_y.size(0)
