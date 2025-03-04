@@ -116,7 +116,6 @@ except ImportError as e:
                 self.fc4 = torch.nn.Linear(64, 32)
                 self.relu4 = torch.nn.ReLU()
                 self.output = torch.nn.Linear(32, 1)
-                self.sigmoid = torch.nn.Sigmoid()
             
             def forward(self, x):
                 x = self.embedding(x)
@@ -142,7 +141,6 @@ except ImportError as e:
                 x = self.fc4(x)
                 x = self.relu4(x)
                 x = self.output(x)
-                x = self.sigmoid(x)
                 return x
                 
         logger.info("Successfully created model classes directly")
@@ -206,7 +204,7 @@ def train_model(data, params):
     model = JambaThreatModel(input_dim).to(device)
     
     # Define loss function and optimizer
-    criterion = nn.BCELoss()
+    criterion = nn.BCEWithLogitsLoss()
     optimizer = optim.Adam(model.parameters(), lr=learning_rate)
     scheduler = optim.lr_scheduler.ReduceLROnPlateau(
         optimizer, mode='min', factor=0.5, patience=5, verbose=True
@@ -302,7 +300,7 @@ def train_model(data, params):
                 
                 val_loss += loss.item()
                 
-                predicted = (outputs > 0.5).float()
+                predicted = (torch.sigmoid(outputs) > 0.5).float()
                 total += batch_y.size(0)
                 correct += (predicted.squeeze() == batch_y).sum().item()
         
@@ -375,10 +373,22 @@ def predict(model_data, data):
     batch_size = 1024
     results = []
     
-    for i in range(0, len(data), batch_size):
-        batch = data.iloc[i:i+batch_size]
-        # Process batch...
-        results.append(batch_result)
+    with torch.no_grad():
+        for i in range(0, len(X_tensor), batch_size):
+            batch_X = X_tensor[i:i+batch_size]
+            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
+                batch_output = model(batch_X)
+            
+            # Apply sigmoid to convert logits to probabilities
+            batch_probs = torch.sigmoid(batch_output)
+            batch_preds = (batch_probs > 0.5).float()
+            
+            # Convert predictions to DataFrame
+            batch_df = data.iloc[i:i+batch_size].copy()
+            batch_df['prediction'] = batch_preds.cpu().numpy()
+            batch_df['probability'] = batch_probs.cpu().numpy()
+            
+            results.append(batch_df)
     
     # Combine results
     return pd.concat(results)

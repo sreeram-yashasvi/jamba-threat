@@ -10,10 +10,10 @@ def test_runpod_connection(api_key, endpoint_id):
     
     # Try different URL formats
     url_formats = [
-        f"https://api.runpod.io/v2/ub3lew01pzj80j/run",
-        f"https://api.runpod.io/v2/ub3lew01pzj80j/runsync",
-        f"https://api.runpod.io/v1/ub3lew01pzj80j/run",
-        f"https://api.runpod.ai/v2/ub3lew01pzj80j/run"
+        f"https://api.runpod.io/v2/{endpoint_id}/run",
+        f"https://api.runpod.io/v2/{endpoint_id}/runsync",
+        f"https://api.runpod.io/v1/{endpoint_id}/run",
+        f"https://api.runpod.ai/v2/{endpoint_id}/run"
     ]
     
     headers = {

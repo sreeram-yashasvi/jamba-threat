@@ -26,7 +26,7 @@ class RunPodClient:
         """
         self.api_key = api_key
         self.endpoint_id = endpoint_id
-        self.base_url = f"https://api.runpod.ai/v2/ub3lew01pzj80j"
+        self.base_url = f"https://api.runpod.ai/v2/{endpoint_id}"
         self.headers = {
             "Authorization": f"Bearer {api_key}",
             "Content-Type": "application/json"

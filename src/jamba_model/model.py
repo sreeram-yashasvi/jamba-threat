@@ -98,7 +98,6 @@ class JambaThreatModel(nn.Module):
         self.fc4 = nn.Linear(64, 32)
         self.relu4 = nn.ReLU()
         self.output = nn.Linear(32, 1)
-        self.sigmoid = nn.Sigmoid()
     
     def forward(self, x):
         """
@@ -152,6 +151,5 @@ class JambaThreatModel(nn.Module):
         x = self.fc4(x)
         x = self.relu4(x)
         x = self.output(x)
-        x = self.sigmoid(x)
         
         return x 
