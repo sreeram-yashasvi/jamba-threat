@@ -13,11 +13,24 @@ import torch.optim as optim
 from torch.cuda.amp import autocast, GradScaler
 import torch.cuda.amp as amp
 import logging
+import runpod
 
-# Set up logging
-logging.basicConfig(level=logging.INFO, 
-                   format='%(asctime)s - %(name)s - %(levelname)s - %(message)s')
-logger = logging.getLogger(__name__)
+# Configure logging
+logging.basicConfig(
+    level=logging.INFO,
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+)
+logger = logging.getLogger("jamba-threat-handler")
+
+# Define the features used by the model
+FEATURES = [
+    'device_age', 'connection_count', 'packet_size_variance', 
+    'bandwidth_usage', 'protocol_anomaly_score', 'encryption_level',
+    'auth_failures', 'unusual_ports', 'traffic_pattern_change',
+    'geographic_anomaly', 'signature_matches', 'privilege_escalation',
+    'packet_manipulation', 'data_exfiltration_attempt', 'api_abuse',
+    'dns_tunneling', 'file_integrity', 'process_injection'
+]
 
 # Print the python path and list directories to debug
 logger.info(f"PYTHONPATH: {os.environ.get('PYTHONPATH', 'Not set')}")
@@ -150,7 +163,7 @@ except ImportError as e:
     
     logger.error("Could not import or create model classes. Will attempt to proceed with inline definitions.")
 
-# Optimization: Cache model
+# Global cache for loaded models to avoid reloading the same model
 _model_cache = {}
 
 def train_model(data, params):
@@ -320,103 +333,161 @@ def train_model(data, params):
     
     # Save the model to a byte buffer
     model_buffer = io.BytesIO()
-    torch.save(model.state_dict(), model_buffer)  # Save state_dict instead of full model
+    torch.save(model, model_buffer)
     model_buffer.seek(0)
     
     # Return the serialized model and metrics
     return {
         "model": base64.b64encode(model_buffer.getvalue()).decode('utf-8'),
         "metrics": {
-            "accuracy": float(history['val_accuracy'][-1]),
-            "training_time": float(training_time),
-            # Simplify history to include just the final values
-            "final_train_loss": float(history['train_loss'][-1]),
-            "final_val_loss": float(history['val_loss'][-1])
+            "accuracy": float(accuracy),
+            "training_time": training_time
         }
     }
 
 def predict(model_data, data):
-    """Make predictions using a trained model.
+    """
+    Make predictions with a trained model.
     
     Args:
-        model_data: Binary model data
-        data: DataFrame with prediction data
-        
+        model_data (str): Base64 encoded model data
+        data (dict): Dictionary containing the input data for prediction
+    
     Returns:
-        DataFrame with predictions
+        dict: Prediction results
     """
-    # OPTIMIZATION: Cache model to avoid reloading
-    model_hash = hash(model_data)
-    
-    if model_hash in _model_cache:
-        model, input_dim = _model_cache[model_hash]
-        print("Using cached model")
-    else:
-        # Load the model
-        model_buffer = io.BytesIO(model_data)
-        model_state = torch.load(model_buffer, map_location=device)
-        
-        # Initialize model
-        input_dim = data.shape[1]
-        model = JambaThreatModel(input_dim).to(device)
-        model.load_state_dict(model_state)
-        model.eval()
-        
-        _model_cache[model_hash] = (model, input_dim)
-    
-    # Convert data to tensor
-    X_tensor = torch.FloatTensor(data.values).to(device)
-    
-    # OPTIMIZATION: Process in batches for large datasets
-    batch_size = 1024
-    results = []
-    
-    with torch.no_grad():
-        for i in range(0, len(X_tensor), batch_size):
-            batch_X = X_tensor[i:i+batch_size]
-            with torch.cuda.amp.autocast(enabled=torch.cuda.is_available()):
-                batch_output = model(batch_X)
-            
-            # Apply sigmoid to convert logits to probabilities
-            batch_probs = torch.sigmoid(batch_output)
-            batch_preds = (batch_probs > 0.5).float()
-            
-            # Convert predictions to DataFrame
-            batch_df = data.iloc[i:i+batch_size].copy()
-            batch_df['prediction'] = batch_preds.cpu().numpy()
-            batch_df['probability'] = batch_probs.cpu().numpy()
-            
-            results.append(batch_df)
-    
-    # Combine results
-    return pd.concat(results)
-
-def handler(event):
-    """RunPod handler function.
-    
-    Args:
-        event: Dictionary with input data
-        
-    Returns:
-        Dictionary with results
-    """
-    logger.info("Handler function called")
-    logger.info(f"Received event: {event}")
-    
     try:
-        # Get input data
-        input_data = event["input"]
-        operation = input_data.get("operation", "predict")
+        logger.info("Starting prediction process")
+        
+        # Deserialize the model
+        try:
+            model_binary = base64.b64decode(model_data)
+            model_buffer = io.BytesIO(model_binary)
+            
+            # Load the model state dict
+            state_dict = torch.load(model_buffer, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
+            
+            # Create a new model instance and load the state dict
+            model = JambaThreatModel(len(FEATURES))
+            model.load_state_dict(state_dict)
+            model.eval()
+            
+            logger.info("Model loaded successfully")
+        except Exception as e:
+            error_msg = f"Error loading model: {str(e)}"
+            logger.error(error_msg)
+            logger.exception(e)
+            return {"error": error_msg}
+        
+        # Deserialize the dataset
+        try:
+            if isinstance(data, dict) and "type" in data and data["type"] == "dataframe":
+                if data.get("format") == "parquet":
+                    binary_data = base64.b64decode(data["data"])
+                    buffer = io.BytesIO(binary_data)
+                    df = pd.read_parquet(buffer)
+                else:
+                    binary_data = base64.b64decode(data["data"])
+                    df = pickle.loads(binary_data)
+                
+                logger.info(f"Prediction data loaded, shape: {df.shape}")
+            else:
+                return {"error": "Invalid data format for prediction"}
+        except Exception as e:
+            error_msg = f"Error loading prediction data: {str(e)}"
+            logger.error(error_msg)
+            logger.exception(e)
+            return {"error": error_msg}
+        
+        # Preprocess the data for prediction
+        try:
+            # Ensure all features are present
+            missing_features = [f for f in FEATURES if f not in df.columns]
+            if missing_features:
+                return {"error": f"Missing features in prediction data: {', '.join(missing_features)}"}
+            
+            # Convert data to tensor
+            X = torch.tensor(df[FEATURES].values, dtype=torch.float32)
+            dataset = ThreatDataset(X, None)  # No labels for prediction
+            dataloader = torch.utils.data.DataLoader(dataset, batch_size=64)
+            
+            logger.info("Data prepared for prediction")
+        except Exception as e:
+            error_msg = f"Error preprocessing prediction data: {str(e)}"
+            logger.error(error_msg)
+            logger.exception(e)
+            return {"error": error_msg}
+        
+        # Make predictions
+        try:
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            model = model.to(device)
+            
+            all_predictions = []
+            
+            with torch.no_grad():
+                for batch_x in dataloader:
+                    batch_x = batch_x.to(device)
+                    outputs = model(batch_x)
+                    
+                    # Apply sigmoid to convert logits to probabilities
+                    probs = torch.sigmoid(outputs).cpu().numpy()
+                    all_predictions.extend(probs.flatten().tolist())
+            
+            logger.info(f"Predictions generated for {len(all_predictions)} samples")
+            
+            # Return predictions
+            return {
+                "predictions": all_predictions,
+                "threshold": 0.5,  # Default threshold for binary classification
+                "num_samples": len(all_predictions)
+            }
+            
+        except Exception as e:
+            error_msg = f"Error making predictions: {str(e)}"
+            logger.error(error_msg)
+            logger.exception(e)
+            return {"error": error_msg}
+            
+    except Exception as e:
+        error_msg = f"Unexpected error in prediction: {str(e)}"
+        logger.error(error_msg)
+        logger.exception(e)
+        return {"error": error_msg}
+
+# Add RunPod serverless handler wrapper
+def _handler(event):
+    """
+    Handler function for RunPod serverless.
+    """
+    try:
+        logger.info("RunPod handler started")
+        
+        # Initialize response
+        response = {"error": None}
+        
+        # Handle both synchronous/asynchronous job
+        job_input = event["input"]
+        
+        if not job_input:
+            response["error"] = "No input provided"
+            return response
+            
+        operation = job_input.get("operation", "predict")
         
         if operation == "train":
-            # Process training request
-            serialized_data = input_data.get("data", {})
+            logger.info("Starting training job")
             
-            # Check if we need to deserialize the dataset
-            if isinstance(serialized_data, dict) and "dataset" in serialized_data:
+            # Get data and parameters from input
+            serialized_data = job_input.get("data", {})
+            
+            if not serialized_data:
+                response["error"] = "No data provided for training"
+                return response
+                
+            try:
                 # Extract dataset and parameters
                 dataset_data = serialized_data.get("dataset", {})
-                target_column = serialized_data.get("target_column", "is_threat")
                 params = serialized_data.get("params", {})
                 
                 # Deserialize the dataset if needed
@@ -435,76 +506,85 @@ def handler(event):
                         
                         logger.info(f"Successfully deserialized DataFrame with shape {df.shape}")
                     except Exception as e:
-                        logger.error(f"Error deserializing DataFrame: {e}")
-                        return {"error": f"Failed to deserialize DataFrame: {str(e)}"}
+                        error_msg = f"Error deserializing DataFrame: {str(e)}"
+                        logger.error(error_msg)
+                        logger.exception(e)
+                        response["error"] = error_msg
+                        return response
                 else:
                     logger.error("Invalid dataset format in request")
-                    return {"error": "Invalid dataset format in request"}
+                    response["error"] = "Invalid dataset format in request"
+                    return response
                 
-                # Train the model with the deserialized DataFrame
+                # Process the training request
                 result = train_model(df, params)
-                return result
-            else:
-                logger.error("Missing dataset in request data")
-                return {"error": "Missing dataset in request data"}
-        
-        elif operation == "predict":
-            # Process prediction request
-            serialized_data = input_data.get("data", {})
-            model_data = input_data.get("model")
-            
-            # Deserialize the dataset if needed
-            if isinstance(serialized_data, dict) and "type" in serialized_data and serialized_data["type"] == "dataframe":
-                logger.info("Deserializing DataFrame for prediction")
-                try:
-                    if serialized_data.get("format") == "parquet":
-                        # Deserialize from parquet
-                        binary_data = base64.b64decode(serialized_data["data"])
-                        buffer = io.BytesIO(binary_data)
-                        df = pd.read_parquet(buffer)
-                    else:
-                        # Deserialize from pickle
-                        binary_data = base64.b64decode(serialized_data["data"])
-                        df = pickle.loads(binary_data)
+                
+                # Make sure the accuracy is a Python float, not numpy or torch type
+                if "metrics" in result and "accuracy" in result["metrics"]:
+                    result["metrics"]["accuracy"] = float(result["metrics"]["accuracy"])
                     
-                    logger.info(f"Successfully deserialized prediction DataFrame with shape {df.shape}")
-                except Exception as e:
-                    logger.error(f"Error deserializing prediction DataFrame: {e}")
-                    return {"error": f"Failed to deserialize prediction DataFrame: {str(e)}"}
-            else:
-                logger.error("Invalid dataset format in prediction request")
-                return {"error": "Invalid dataset format in prediction request"}
+                # Log successful completion and result size
+                model_size = len(result.get("model", "")) if isinstance(result.get("model"), str) else 0
+                logger.info(f"Training completed. Result size: {model_size / 1024:.2f} KB")
+                
+                # Set the output
+                response = result
+                
+            except Exception as e:
+                error_msg = f"Error in training: {str(e)}"
+                logger.error(error_msg)
+                logger.exception(e)
+                response["error"] = error_msg
+                
+        elif operation == "predict":
+            logger.info("Starting prediction job")
             
-            # Make predictions with the deserialized DataFrame
-            predictions = predict(model_data, df)
-            return predictions
-        
-        elif operation == "test":
-            # Simple test operation to verify the endpoint is working
-            logger.info("Test operation received")
-            return {"status": "success", "message": "Endpoint is working correctly"}
-        
+            # Get data and model from input
+            serialized_data = job_input.get("data", {})
+            model_data = job_input.get("model")
+            
+            if not serialized_data or not model_data:
+                response["error"] = "Missing data or model for prediction"
+                return response
+            
+            try:
+                # Make predictions
+                result = predict(model_data, serialized_data)
+                response = result
+            except Exception as e:
+                error_msg = f"Error in prediction: {str(e)}"
+                logger.error(error_msg)
+                logger.exception(e)
+                response["error"] = error_msg
         else:
-            return {"error": f"Unknown operation: {operation}"}
-    
+            response["error"] = f"Unsupported operation: {operation}"
+            
+        return response
+        
     except Exception as e:
         logger.error(f"Error in handler: {str(e)}")
-        import traceback
-        logger.error(traceback.format_exc())
-        return {"error": str(e)}
+        logger.exception(e)
+        return {"error": f"Handler error: {str(e)}"}
 
-# Start server
+# This is the function that will be called by the RunPod serverless system
+def handler(event):
+    logger.info(f"Received event: {event}")
+    try:
+        return _handler(event)
+    except Exception as e:
+        logger.error(f"Unhandled exception in wrapper: {str(e)}")
+        logger.exception(e)
+        return {"error": f"Critical error: {str(e)}"}
+
+# Only register and start the server if run directly
 if __name__ == "__main__":
-    # For RunPod version 0.10.0
-    import runpod
+    # Start server
+    print("Starting Jamba Threat Model server")
+    # Register the handler function with RunPod
     runpod.serverless.start({"handler": handler})
-    
-    # Uncomment for local debugging if needed:
-    # test_input = {
-    #     "input": {
-    #         "operation": "train",
-    #         "data": {...}  # Add test data here if needed
-    #     }
-    # }
-    # result = handler(test_input)
-    # print(json.dumps(result, indent=2))
+else:
+    # When imported as a module by runpod.serverless.start
+    # we need to explicitly register our handler
+    logger.info("Registering handler with RunPod serverless system")
+    # This is what runpod.serverless.start will look for
+    run_model = {"handler": handler}
