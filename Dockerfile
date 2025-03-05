@@ -24,7 +24,7 @@ RUN pip install --no-cache-dir \
 RUN mkdir -p /app/jamba_model
 RUN touch /app/jamba_model/__init__.py
 
-# Copy model files directly to app directory first
+# Copy model files
 COPY src/jamba_model.py /app/jamba_model/model.py
 COPY src/handler.py /app/handler.py
 
