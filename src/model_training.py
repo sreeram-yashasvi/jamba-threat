@@ -172,7 +172,7 @@ class ThreatModelTrainer:
             logger.info(f"Initialized Jamba model with input dimension: {input_dim}")
             
             # Define loss function and optimizer
-            criterion = nn.BCELoss()
+            criterion = nn.BCEWithLogitsLoss()
             
             # OPTIMIZATION: Enable cudnn benchmarking
             torch.backends.cudnn.benchmark = True
