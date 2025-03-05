@@ -320,7 +320,7 @@ def train_model(data, params):
     
     # Save the model to a byte buffer
     model_buffer = io.BytesIO()
-    torch.save(model, model_buffer)
+    torch.save(model.state_dict(), model_buffer)  # Save state_dict instead of full model
     model_buffer.seek(0)
     
     # OPTIMIZATION: Optimize model for inference after training

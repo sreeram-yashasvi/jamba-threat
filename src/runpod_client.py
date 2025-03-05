@@ -46,12 +46,12 @@ class RunPodClient:
         
         logger.info(f"RunPod client initialized for endpoint {endpoint_id}")
     
-    def run_sync(self, input_data, timeout=3600):
+    def run_sync(self, input_data, timeout=7200):
         """Run a synchronous job on RunPod.
         
         Args:
             input_data: Input data for the job
-            timeout: Timeout in seconds
+            timeout: Timeout in seconds (default: 7200 seconds / 2 hours)
             
         Returns:
             Job result
@@ -100,7 +100,15 @@ class RunPodClient:
                     
                     # Wait before polling again, increasing delay on subsequent attempts
                     wait_time = min(5 * (1.5 ** retry_count), 60)  # Cap at 60s
-                    logger.info(f"Job status: {status}. Waiting {wait_time:.1f}s before checking again.")
+                    elapsed_time = time.time() - start_time
+                    remaining_time = timeout - elapsed_time
+                    
+                    logger.info(f"Job status: {status}. Elapsed: {elapsed_time:.1f}s, Remaining: {remaining_time:.1f}s. Waiting {wait_time:.1f}s before checking again.")
+                    
+                    # If we're approaching timeout, log a warning
+                    if remaining_time < 300:  # Less than 5 minutes remaining
+                        logger.warning(f"Job is approaching timeout! Only {remaining_time:.1f}s remaining out of {timeout}s limit.")
+                        
                     time.sleep(wait_time)
                     
                 except (requests.exceptions.ConnectionError, 
