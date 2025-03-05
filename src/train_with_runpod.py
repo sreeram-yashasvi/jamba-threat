@@ -1,6 +1,7 @@
 import os
 import argparse
 import logging
+import base64
 from runpod_client import RunPodClient
 
 logging.basicConfig(level=logging.INFO)
@@ -35,8 +36,10 @@ def main():
     if 'model' in result:
         os.makedirs('models', exist_ok=True)
         model_path = f"models/jamba_runpod_model.pth"
+        # Decode base64 model data
+        model_data = base64.b64decode(result['model'])
         with open(model_path, 'wb') as f:
-            f.write(result['model'])
+            f.write(model_data)
         logger.info(f"Model saved to {model_path}")
     
     # Show training metrics

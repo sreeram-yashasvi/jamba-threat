@@ -318,9 +318,9 @@ def train_model(data, params):
     
     training_time = time.time() - start_time
     
-    # Save model
+    # Save the model to a byte buffer
     model_buffer = io.BytesIO()
-    torch.save(model.state_dict(), model_buffer)
+    torch.save(model, model_buffer)
     model_buffer.seek(0)
     
     # OPTIMIZATION: Optimize model for inference after training
@@ -329,11 +329,11 @@ def train_model(data, params):
         model = torch.jit.trace(model, torch.rand(1, input_dim, device=device))
     
     return {
-        'model': model_buffer.read(),
-        'metrics': {
-            'accuracy': history['val_accuracy'][-1],
-            'training_time': training_time,
-            'history': history
+        "model": base64.b64encode(model_buffer.getvalue()).decode('utf-8'),
+        "metrics": {
+            "accuracy": history['val_accuracy'][-1],
+            "training_time": training_time,
+            "history": history
         }
     }
 
