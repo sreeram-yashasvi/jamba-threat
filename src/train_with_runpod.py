@@ -46,6 +46,8 @@ def main():
     if 'metrics' in result:
         logger.info(f"Final accuracy: {result['metrics']['accuracy']:.4f}")
         logger.info(f"Training time: {result['metrics']['training_time']:.2f} seconds")
+        logger.info(f"Final training loss: {result['metrics'].get('final_train_loss', 'N/A')}")
+        logger.info(f"Final validation loss: {result['metrics'].get('final_val_loss', 'N/A')}")
     
     return result
 

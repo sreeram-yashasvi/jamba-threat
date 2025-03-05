@@ -323,17 +323,15 @@ def train_model(data, params):
     torch.save(model.state_dict(), model_buffer)  # Save state_dict instead of full model
     model_buffer.seek(0)
     
-    # OPTIMIZATION: Optimize model for inference after training
-    model.eval()
-    if torch.cuda.is_available():
-        model = torch.jit.trace(model, torch.rand(1, input_dim, device=device))
-    
+    # Return the serialized model and metrics
     return {
         "model": base64.b64encode(model_buffer.getvalue()).decode('utf-8'),
         "metrics": {
-            "accuracy": history['val_accuracy'][-1],
-            "training_time": training_time,
-            "history": history
+            "accuracy": float(history['val_accuracy'][-1]),
+            "training_time": float(training_time),
+            # Simplify history to include just the final values
+            "final_train_loss": float(history['train_loss'][-1]),
+            "final_val_loss": float(history['val_loss'][-1])
         }
     }
 
