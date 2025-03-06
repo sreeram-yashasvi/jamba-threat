@@ -17,6 +17,7 @@ import runpod
 import sys
 import traceback
 from pathlib import Path
+import importlib.util
 
 # Configure detailed logging
 logging.basicConfig(
@@ -27,6 +28,15 @@ logging.basicConfig(
     ]
 )
 logger = logging.getLogger("jamba-threat-handler")
+
+# Check and set environment variables with defaults
+MODEL_DIR = os.environ.get("MODEL_DIR", "./models")
+LOGS_DIR = os.environ.get("LOGS_DIR", "./logs")
+DEBUG = os.environ.get("DEBUG", "false").lower() == "true"
+
+# Create directories if they don't exist
+os.makedirs(MODEL_DIR, exist_ok=True)
+os.makedirs(LOGS_DIR, exist_ok=True)
 
 # Define the features used by the model
 FEATURES = [
@@ -48,35 +58,45 @@ if os.path.exists('/app/jamba_model'):
         with open('/app/jamba_model/__init__.py', 'r') as f:
             logger.info(f"Contents of __init__.py: {f.read()}")
 
-# Global cache for loaded models to avoid reloading the same model
+# Global model cache to avoid reloading
 model_cache = {}
 
-# Import model classes with detailed error reporting
+# Import model classes with better error handling
 try:
-    # Direct import from the properly installed module
-    logger.info("Attempting to import model classes...")
+    logger.info("Importing JambaThreatModel from jamba_model")
     from jamba_model import JambaThreatModel, ThreatDataset
-    logger.info("Successfully imported model classes from jamba_model module")
+    logger.info("Successfully imported JambaThreatModel and ThreatDataset")
 except ImportError as e:
-    logger.error(f"Failed to import model classes: {e}")
-    logger.error(f"Python path: {sys.path}")
-    logger.error(f"Import error details: {traceback.format_exc()}")
+    logger.warning(f"Failed to import from jamba_model directly: {e}")
+    logger.info("Attempting to import from alternative paths...")
     
-    # Try to recover by adding to sys.path
-    logger.info("Attempting to recover by modifying sys.path...")
-    sys.path.append('/app')
+    # Try adjusting sys.path
+    current_dir = os.path.dirname(os.path.abspath(__file__))
+    potential_paths = [
+        current_dir,
+        os.path.dirname(current_dir),
+        os.path.join(os.path.dirname(current_dir), "src")
+    ]
+    
+    for path in potential_paths:
+        if path not in sys.path:
+            logger.info(f"Adding {path} to sys.path")
+            sys.path.append(path)
+    
     try:
+        logger.info("Trying import after path adjustment")
         from jamba_model import JambaThreatModel, ThreatDataset
-        logger.info("Successfully imported after modifying sys.path")
-    except ImportError:
-        logger.error("Could not import even after modifying sys.path")
-        logger.error("This is a critical error. Container may need to be rebuilt.")
-        # We'll continue and let the handler fail if needed, as this gives more diagnostics
-        # than failing immediately
+        logger.info("Successfully imported after path adjustment")
+    except ImportError as e:
+        logger.error(f"Failed to import from jamba_model after path adjustment: {e}")
+        logger.info("Current sys.path: " + str(sys.path))
+        logger.info("Current directory: " + os.getcwd())
+        logger.info("Files in current directory: " + str(os.listdir('.')))
+        if os.path.exists('./src'):
+            logger.info("Files in ./src: " + str(os.listdir('./src')))
+        raise
 
-# Global cache for loaded models to avoid reloading the same model
-_model_cache = {}
-
+# Train the model function
 def train_model(data, params):
     """Train the Jamba threat detection model.
     
@@ -87,418 +107,382 @@ def train_model(data, params):
     Returns:
         Dictionary with training results
     """
-    # Extract parameters
-    target_column = params.get('target_column', 'is_threat')
-    epochs = params.get('epochs', 30)
-    learning_rate = params.get('learning_rate', 0.001)
-    batch_size = params.get('batch_size', 128)
-    
-    # Check GPU availability
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    print(f"Using device: {device}")
-    
-    # Prepare data
-    X = data.drop([target_column], axis=1)
-    y = data[target_column]
-    
-    X_train, X_test, y_train, y_test = train_test_split(
-        X, y, test_size=0.2, random_state=42
-    )
-    
-    # Create data loaders
-    train_dataset = ThreatDataset(X_train, y_train)
-    test_dataset = ThreatDataset(X_test, y_test)
-    
-    train_loader = torch.utils.data.DataLoader(
-        train_dataset, 
-        batch_size=batch_size, 
-        shuffle=True,
-        pin_memory=True,
-        num_workers=4
-    )
-    test_loader = torch.utils.data.DataLoader(
-        test_dataset, 
-        batch_size=batch_size,
-        pin_memory=True,
-        num_workers=4
-    )
-    
-    # Initialize model
-    input_dim = X.shape[1]
-    model = JambaThreatModel(input_dim).to(device)
-    
-    # Define loss function and optimizer
-    criterion = nn.BCEWithLogitsLoss()
-    optimizer = optim.Adam(model.parameters(), lr=learning_rate)
-    scheduler = optim.lr_scheduler.ReduceLROnPlateau(
-        optimizer, mode='min', factor=0.5, patience=5, verbose=True
-    )
-    
-    # OPTIMIZATION: Use automatic mixed precision
-    # In PyTorch 2.0.1, we need to be careful with dtype settings
-    amp_enabled = torch.cuda.is_available()
-    scaler = amp.GradScaler(enabled=amp_enabled)
-    
-    # OPTIMIZATION: JIT compile model if not training on GPU
-    if not amp_enabled:
-        model = torch.jit.script(model)  # JIT for CPU
-
-    # Log training configuration
-    logger.info(f"Training on device: {device}, Mixed precision: {amp_enabled}")
-    logger.info(f"Batch size: {batch_size}, Learning rate: {learning_rate}")
-    
-    # OPTIMIZATION: Set cuda high water mark once
-    if torch.cuda.is_available():
-        torch.cuda.empty_cache()
-        # This line causes errors with PyTorch 2.0.1 in the Docker container
-        # torch.cuda.memory._set_allocator_settings("expandable_segments:True")
-        
-        # Use these more compatible memory settings instead
-        torch.cuda.set_per_process_memory_fraction(0.9)  # Use 90% of available GPU memory
-        logger.info(f"Set CUDA memory fraction to 0.9")
-        
-        # Report available GPU memory
-        if hasattr(torch.cuda, 'mem_get_info'):
-            free_mem, total_mem = torch.cuda.mem_get_info(0)
-            logger.info(f"GPU memory: {free_mem/1e9:.2f} GB free, {total_mem/1e9:.2f} GB total")
-    
-    # Training loop
-    start_time = time.time()
-    
-    history = {
-        'train_loss': [],
-        'val_loss': [],
-        'val_accuracy': []
-    }
-    
-    for epoch in range(epochs):
-        model.train()
-        total_loss = 0
-        
-        for batch_X, batch_y in train_loader:
-            batch_X = batch_X.to(device)
-            batch_y = batch_y.to(device)
-            
-            optimizer.zero_grad()
-            
-            # Use mixed precision training
-            if amp_enabled:
-                with autocast():
-                    outputs = model(batch_X)
-                    loss = criterion(outputs, batch_y.unsqueeze(1))
-                
-                # Scale loss and backpropagate
-                scaler.scale(loss).backward()
-                scaler.step(optimizer)
-                scaler.update()
-            else:
-                # Regular training without mixed precision
-                outputs = model(batch_X)
-                loss = criterion(outputs, batch_y.unsqueeze(1))
-                loss.backward()
-                optimizer.step()
-            
-            total_loss += loss.item()
-        
-        avg_train_loss = total_loss / len(train_loader)
-        history['train_loss'].append(avg_train_loss)
-        
-        # Validation
-        model.eval()
-        val_loss = 0
-        correct = 0
-        total = 0
-        
-        with torch.no_grad():
-            for batch_X, batch_y in test_loader:
-                batch_X = batch_X.to(device)
-                batch_y = batch_y.to(device)
-                
-                if amp_enabled:
-                    with autocast():
-                        outputs = model(batch_X)
-                        loss = criterion(outputs, batch_y.unsqueeze(1))
-                else:
-                    outputs = model(batch_X)
-                    loss = criterion(outputs, batch_y.unsqueeze(1))
-                
-                val_loss += loss.item()
-                
-                predicted = (torch.sigmoid(outputs) > 0.5).float()
-                total += batch_y.size(0)
-                correct += (predicted.squeeze() == batch_y).sum().item()
-        
-        avg_val_loss = val_loss / len(test_loader)
-        accuracy = correct / total
-        
-        history['val_loss'].append(avg_val_loss)
-        history['val_accuracy'].append(accuracy)
-        
-        # Update learning rate based on validation loss
-        scheduler.step(avg_val_loss)
-        
-        print(f'Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.4f}, '
-              f'Val Loss: {avg_val_loss:.4f}, Val Accuracy: {accuracy:.4f}')
-    
-    training_time = time.time() - start_time
-    
-    # Save the model to a byte buffer
-    model_buffer = io.BytesIO()
-    torch.save(model.state_dict(), model_buffer)  # Save state_dict instead of full model
-    model_buffer.seek(0)
-    
-    # Return the serialized model and metrics
-    return {
-        "model": base64.b64encode(model_buffer.getvalue()).decode('utf-8'),
-        "metrics": {
-            "accuracy": float(accuracy),
-            "training_time": training_time
-        }
-    }
-
-def predict(model_data, data):
-    """
-    Make predictions with a trained model.
-    
-    Args:
-        model_data (str): Base64 encoded model data
-        data (dict): Dictionary containing the input data for prediction
-    
-    Returns:
-        dict: Prediction results
-    """
     try:
-        logger.info("Starting prediction process")
+        logger.info("Starting model training")
         
-        # Deserialize the model
-        try:
-            model_binary = base64.b64decode(model_data)
-            model_buffer = io.BytesIO(model_binary)
-            
-            # Load the model state dict
-            state_dict = torch.load(model_buffer, map_location=torch.device('cuda' if torch.cuda.is_available() else 'cpu'))
-            
-            # Create a new model instance and load the state dict
-            model = JambaThreatModel(len(FEATURES))
-            model.load_state_dict(state_dict)
-            model.eval()
-            
-            logger.info("Model loaded successfully")
-        except Exception as e:
-            error_msg = f"Error loading model: {str(e)}"
-            logger.error(error_msg)
-            logger.exception(e)
-            return {"error": error_msg}
+        # Extract parameters
+        target_column = params.get('target_column', 'is_threat')
+        epochs = params.get('epochs', 30)
+        learning_rate = params.get('learning_rate', 0.001)
+        batch_size = params.get('batch_size', 128)
         
-        # Deserialize the dataset
-        try:
-            if isinstance(data, dict) and "type" in data and data["type"] == "dataframe":
-                if data.get("format") == "parquet":
-                    binary_data = base64.b64decode(data["data"])
-                    buffer = io.BytesIO(binary_data)
-                    df = pd.read_parquet(buffer)
-                else:
-                    binary_data = base64.b64decode(data["data"])
-                    df = pickle.loads(binary_data)
-                
-                logger.info(f"Prediction data loaded, shape: {df.shape}")
-            else:
-                return {"error": "Invalid data format for prediction"}
-        except Exception as e:
-            error_msg = f"Error loading prediction data: {str(e)}"
-            logger.error(error_msg)
-            logger.exception(e)
-            return {"error": error_msg}
+        # Check GPU availability
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
         
-        # Preprocess the data for prediction
-        try:
-            # Ensure all features are present
-            missing_features = [f for f in FEATURES if f not in df.columns]
-            if missing_features:
-                return {"error": f"Missing features in prediction data: {', '.join(missing_features)}"}
-            
-            # Convert data to tensor
-            X = torch.tensor(df[FEATURES].values, dtype=torch.float32)
-            dataset = ThreatDataset(X, None)  # No labels for prediction
-            dataloader = torch.utils.data.DataLoader(dataset, batch_size=64)
-            
-            logger.info("Data prepared for prediction")
-        except Exception as e:
-            error_msg = f"Error preprocessing prediction data: {str(e)}"
-            logger.error(error_msg)
-            logger.exception(e)
-            return {"error": error_msg}
+        # Prepare data
+        logger.info(f"Preparing data with shape: {data.shape}")
+        X = data.drop([target_column], axis=1)
+        y = data[target_column]
         
-        # Make predictions
+        # Split data
+        X_train, X_test, y_train, y_test = train_test_split(
+            X, y, test_size=0.2, random_state=42
+        )
+        
+        # Create data loaders
+        train_dataset = ThreatDataset(X_train, y_train)
+        test_dataset = ThreatDataset(X_test, y_test)
+        
         try:
-            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-            model = model.to(device)
+            # Reduced worker count for stability in container
+            num_workers = 2 if torch.cuda.is_available() else 0
+            logger.info(f"Using {num_workers} dataloader workers")
             
-            all_predictions = []
+            train_loader = torch.utils.data.DataLoader(
+                train_dataset, 
+                batch_size=batch_size, 
+                shuffle=True,
+                pin_memory=torch.cuda.is_available(),
+                num_workers=num_workers
+            )
+            test_loader = torch.utils.data.DataLoader(
+                test_dataset, 
+                batch_size=batch_size, 
+                shuffle=False,
+                pin_memory=torch.cuda.is_available(),
+                num_workers=num_workers
+            )
             
-            with torch.no_grad():
-                for batch_x in dataloader:
-                    batch_x = batch_x.to(device)
-                    outputs = model(batch_x)
-                    
-                    # Apply sigmoid to convert logits to probabilities
-                    probs = torch.sigmoid(outputs).cpu().numpy()
-                    all_predictions.extend(probs.flatten().tolist())
+            # Initialize model
+            input_dim = X_train.shape[1]
+            logger.info(f"Initializing model with input dimension: {input_dim}")
+            model = JambaThreatModel(input_dim).to(device)
             
-            logger.info(f"Predictions generated for {len(all_predictions)} samples")
+            # Define loss function and optimizer
+            criterion = nn.BCEWithLogitsLoss()
+            optimizer = optim.Adam(model.parameters(), lr=learning_rate)
             
-            # Return predictions
-            return {
-                "predictions": all_predictions,
-                "threshold": 0.5,  # Default threshold for binary classification
-                "num_samples": len(all_predictions)
+            # Use mixed precision if available
+            scaler = GradScaler() if torch.cuda.is_available() else None
+            
+            # Training loop
+            logger.info(f"Starting training for {epochs} epochs...")
+            start_time = time.time()
+            
+            training_history = {
+                'train_loss': [],
+                'val_loss': [],
+                'val_accuracy': []
             }
             
-        except Exception as e:
-            error_msg = f"Error making predictions: {str(e)}"
-            logger.error(error_msg)
-            logger.exception(e)
-            return {"error": error_msg}
+            for epoch in range(epochs):
+                model.train()
+                train_loss = 0.0
+                
+                for batch_idx, (features, targets) in enumerate(train_loader):
+                    features, targets = features.to(device), targets.to(device)
+                    
+                    # Mixed precision training
+                    if scaler is not None:
+                        with autocast():
+                            outputs = model(features)
+                            loss = criterion(outputs.squeeze(), targets)
+                        
+                        optimizer.zero_grad()
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        outputs = model(features)
+                        loss = criterion(outputs.squeeze(), targets)
+                        
+                        optimizer.zero_grad()
+                        loss.backward()
+                        optimizer.step()
+                    
+                    train_loss += loss.item()
+                    
+                    # Log progress
+                    if (batch_idx + 1) % 10 == 0:
+                        logger.info(f"Epoch [{epoch+1}/{epochs}], Batch [{batch_idx+1}/{len(train_loader)}], Loss: {loss.item():.4f}")
+                
+                avg_train_loss = train_loss / len(train_loader)
+                training_history['train_loss'].append(avg_train_loss)
+                
+                # Validation
+                model.eval()
+                correct = 0
+                total = 0
+                val_loss = 0.0
+                
+                with torch.no_grad():
+                    for features, targets in test_loader:
+                        features, targets = features.to(device), targets.to(device)
+                        outputs = model(features)
+                        loss = criterion(outputs.squeeze(), targets)
+                        val_loss += loss.item()
+                        
+                        predicted = (outputs.squeeze() > 0.5).float()
+                        total += targets.size(0)
+                        correct += (predicted == targets).sum().item()
+                
+                accuracy = correct / total
+                avg_val_loss = val_loss / len(test_loader)
+                
+                training_history['val_loss'].append(avg_val_loss)
+                training_history['val_accuracy'].append(accuracy)
+                
+                logger.info(f"Epoch [{epoch+1}/{epochs}], Train Loss: {avg_train_loss:.4f}, Val Loss: {avg_val_loss:.4f}, Accuracy: {accuracy:.4f}")
             
-    except Exception as e:
-        error_msg = f"Unexpected error in prediction: {str(e)}"
-        logger.error(error_msg)
-        logger.exception(e)
-        return {"error": error_msg}
-
-# Add RunPod serverless handler wrapper
-def _handler(event):
-    """
-    Handler function for RunPod serverless.
-    """
-    try:
-        logger.info("RunPod handler started")
-        
-        # Initialize response
-        response = {"error": None}
-        
-        # Handle both synchronous/asynchronous job
-        job_input = event["input"]
-        
-        if not job_input:
-            response["error"] = "No input provided"
-            return response
+            training_time = time.time() - start_time
+            logger.info(f"Training completed in {training_time:.2f} seconds")
+            logger.info(f"Final accuracy: {accuracy:.4f}")
             
-        operation = job_input.get("operation", "predict")
-        
-        if operation == "health_check":
-            # Simple health check operation
+            # Serialize model
+            model_buffer = io.BytesIO()
+            torch.save(model.state_dict(), model_buffer)  # Save state_dict instead of full model
+            model_buffer.seek(0)
+            model_data = base64.b64encode(model_buffer.getvalue()).decode('utf-8')
+            
+            # Return results
             return {
-                "status": "healthy",
-                "environment": {
-                    "python_version": sys.version,
-                    "torch_version": torch.__version__,
-                    "cuda_available": torch.cuda.is_available(),
-                    "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
-                    "cwd": os.getcwd(),
-                    "python_path": sys.path,
+                'model': model_data,
+                'metrics': {
+                    'accuracy': accuracy,
+                    'training_time': training_time,
+                    'training_history': training_history
                 }
             }
-        elif operation == "train":
-            logger.info("Starting training job")
             
-            # Get data and parameters from input
-            serialized_data = job_input.get("data", {})
-            
-            if not serialized_data:
-                response["error"] = "No data provided for training"
-                return response
+        except Exception as e:
+            logger.error(f"Error during training: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {'error': str(e), 'traceback': traceback.format_exc()}
+    
+    except Exception as e:
+        logger.error(f"Error during training: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {'error': str(e), 'traceback': traceback.format_exc()}
+
+def predict(model_data, data):
+    """Make predictions using a trained model.
+    
+    Args:
+        model_data: Serialized model
+        data: DataFrame with features
+        
+    Returns:
+        Dictionary with prediction results
+    """
+    try:
+        # Check device
+        device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        logger.info(f"Using device: {device}")
+        
+        # Deserialize model
+        model_buffer = io.BytesIO(base64.b64decode(model_data))
+        
+        # Get input dimensions from data
+        input_dim = data.shape[1]
+        logger.info(f"Creating model with input dimension: {input_dim}")
+        
+        # Initialize model architecture
+        model = JambaThreatModel(input_dim).to(device)
+        
+        # Load model state
+        try:
+            state_dict = torch.load(model_buffer, map_location=device)
+            model.load_state_dict(state_dict)
+            logger.info("Model loaded successfully")
+        except Exception as e:
+            logger.error(f"Error loading model state: {str(e)}")
+            logger.error(f"Traceback: {traceback.format_exc()}")
+            return {'error': f"Model loading failed: {str(e)}"}
+        
+        # Prepare data
+        dataset = ThreatDataset(data, np.zeros(len(data)))  # Dummy targets
+        dataloader = torch.utils.data.DataLoader(
+            dataset, 
+            batch_size=64, 
+            shuffle=False,
+            pin_memory=torch.cuda.is_available()
+        )
+        
+        # Run predictions
+        model.eval()
+        all_predictions = []
+        all_scores = []
+        
+        with torch.no_grad():
+            for features, _ in dataloader:
+                features = features.to(device)
+                outputs = model(features)
+                scores = torch.sigmoid(outputs.squeeze())
+                predictions = (scores > 0.5).int()
                 
-            try:
-                # Extract dataset and parameters
-                dataset_data = serialized_data.get("dataset", {})
-                params = serialized_data.get("params", {})
+                all_predictions.extend(predictions.cpu().numpy().tolist())
+                all_scores.extend(scores.cpu().numpy().tolist())
+        
+        # Return predictions
+        return {
+            'predictions': all_predictions,
+            'scores': all_scores,
+            'metadata': {
+                'model_input_dim': input_dim,
+                'device': str(device),
+                'num_samples': len(data)
+            }
+        }
+        
+    except Exception as e:
+        logger.error(f"Error during prediction: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {'error': str(e), 'traceback': traceback.format_exc()}
+
+def health_check():
+    """
+    Perform a health check on the model.
+    
+    Returns:
+        Dictionary with health check results
+    """
+    try:
+        # Check if PyTorch is available
+        logger.info(f"PyTorch version: {torch.__version__}")
+        logger.info(f"CUDA available: {torch.cuda.is_available()}")
+        
+        # Check if model can be initialized
+        input_dim = len(FEATURES)
+        model = JambaThreatModel(input_dim)
+        
+        # Create a sample input
+        sample_input = torch.randn(4, input_dim)
+        
+        # Test forward pass
+        output = model(sample_input)
+        
+        return {
+            "success": True,
+            "status": "healthy",
+            "pytorch_version": torch.__version__,
+            "cuda_available": torch.cuda.is_available(),
+            "model_initialized": True,
+            "forward_pass_successful": True,
+            "output_shape": list(output.shape)
+        }
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        return {
+            "success": False,
+            "status": "unhealthy",
+            "error": str(e)
+        }
+
+def _handler(event):
+    """Handler function for RunPod.
+    
+    Args:
+        event: RunPod event object
+        
+    Returns:
+        Response object
+    """
+    try:
+        logger.info(f"Received request: {json.dumps(event)[:1000]}...")
+        
+        # Extract input data
+        input_data = event.get("input", {})
+        operation = input_data.get("operation")
+        data_dict = input_data.get("data", {})
+        
+        # Deserialize dataset if present
+        if "dataset" in data_dict:
+            serialized_df = data_dict["dataset"]
+            if isinstance(serialized_df, dict):
+                df_type = serialized_df.get("type")
+                df_format = serialized_df.get("format")
                 
-                # Deserialize the dataset if needed
-                if isinstance(dataset_data, dict) and "type" in dataset_data and dataset_data["type"] == "dataframe":
-                    logger.info("Deserializing DataFrame from serialized data")
-                    try:
-                        if dataset_data.get("format") == "parquet":
-                            # Deserialize from parquet
-                            binary_data = base64.b64decode(dataset_data["data"])
-                            buffer = io.BytesIO(binary_data)
-                            df = pd.read_parquet(buffer)
-                        else:
-                            # Deserialize from pickle
-                            binary_data = base64.b64decode(dataset_data["data"])
-                            df = pickle.loads(binary_data)
-                        
-                        logger.info(f"Successfully deserialized DataFrame with shape {df.shape}")
-                    except Exception as e:
-                        error_msg = f"Error deserializing DataFrame: {str(e)}"
-                        logger.error(error_msg)
-                        logger.exception(e)
-                        response["error"] = error_msg
-                        return response
+                if df_type == "dataframe":
+                    if df_format == "parquet":
+                        # Deserialize parquet
+                        parquet_bytes = base64.b64decode(serialized_df["data"])
+                        data = pd.read_parquet(io.BytesIO(parquet_bytes))
+                    else:
+                        # Fallback to pickle
+                        pickle_bytes = base64.b64decode(serialized_df["data"])
+                        data = pickle.loads(pickle_bytes)
                 else:
-                    logger.error("Invalid dataset format in request")
-                    response["error"] = "Invalid dataset format in request"
-                    return response
-                
-                # Process the training request
-                result = train_model(df, params)
-                
-                # Make sure the accuracy is a Python float, not numpy or torch type
-                if "metrics" in result and "accuracy" in result["metrics"]:
-                    result["metrics"]["accuracy"] = float(result["metrics"]["accuracy"])
-                    
-                # Log successful completion and result size
-                model_size = len(result.get("model", "")) if isinstance(result.get("model"), str) else 0
-                logger.info(f"Training completed. Result size: {model_size / 1024:.2f} KB")
-                
-                # Set the output
-                response = result
-                
-            except Exception as e:
-                error_msg = f"Error in training: {str(e)}"
-                logger.error(error_msg)
-                logger.exception(e)
-                response["error"] = error_msg
-                
-        elif operation == "predict":
-            logger.info("Starting prediction job")
-            
-            # Get data and model from input
-            serialized_data = job_input.get("data", {})
-            model_data = job_input.get("model")
-            
-            if not serialized_data or not model_data:
-                response["error"] = "Missing data or model for prediction"
-                return response
-            
-            try:
-                # Make predictions
-                result = predict(model_data, serialized_data)
-                response = result
-            except Exception as e:
-                error_msg = f"Error in prediction: {str(e)}"
-                logger.error(error_msg)
-                logger.exception(e)
-                response["error"] = error_msg
+                    data = pd.DataFrame()
+            else:
+                data = pd.DataFrame()
         else:
-            response["error"] = f"Unsupported operation: {operation}"
+            data = pd.DataFrame()
+        
+        # Process operations
+        if operation == "train":
+            logger.info(f"Training model with {len(data)} samples")
+            params = data_dict.get("params", {})
+            result = train_model(data, params)
+            logger.info("Training completed")
+            return result
             
-        return response
+        elif operation == "predict":
+            logger.info(f"Making predictions for {len(data)} samples")
+            model_data = data_dict.get("model")
+            result = predict(model_data, data)
+            logger.info("Prediction completed")
+            return result
+        
+        elif operation == "health":
+            # Health check operation
+            logger.info("Processing health check operation")
+            return health_check()
+        
+        else:
+            # Unknown operation
+            logger.error(f"Unknown operation: {operation}")
+            return {
+                "success": False,
+                "error": f"Unknown operation: {operation}"
+            }
         
     except Exception as e:
         logger.error(f"Error in handler: {str(e)}")
-        logger.error(traceback.format_exc())
-        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"error": str(e), "traceback": traceback.format_exc()}
 
-# This is the function that will be called by the RunPod serverless system
 def handler(event):
-    logger.info(f"Received event: {event}")
+    """Wrapper function for the handler to ensure consistent error handling.
+    
+    Args:
+        event: RunPod event object
+        
+    Returns:
+        Response object
+    """
     try:
-        return _handler(event)
+        logger.info("Starting Jamba Threat Handler...")
+        
+        if not event:
+            logger.error("Received empty event")
+            return {"error": "Empty event received"}
+        
+        if not isinstance(event, dict):
+            logger.error(f"Received non-dict event: {type(event)}")
+            return {"error": f"Expected dict event, got {type(event)}"}
+        
+        # For debugging
+        logger.info(f"Event keys: {list(event.keys())}")
+        
+        result = _handler(event)
+        return result
+        
     except Exception as e:
-        logger.error(f"Unhandled exception in wrapper: {str(e)}")
-        logger.exception(e)
-        return {"error": f"Critical error: {str(e)}"}
+        logger.error(f"Critical error in handler wrapper: {str(e)}")
+        logger.error(f"Traceback: {traceback.format_exc()}")
+        return {"error": f"Critical error: {str(e)}", "traceback": traceback.format_exc()}
 
 # Only register and start the server if run directly
 if __name__ == "__main__":

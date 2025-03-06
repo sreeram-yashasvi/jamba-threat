@@ -6,10 +6,18 @@ import numpy as np
 import pandas as pd
 import logging
 import sys
+import io
 
 # Set up logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Set deterministic behavior for reproducibility
+torch.manual_seed(42)
+if torch.cuda.is_available():
+    torch.cuda.manual_seed_all(42)
+torch.backends.cudnn.deterministic = True
+torch.backends.cudnn.benchmark = False
 
 # Log model initialization
 logger.info(f"Initializing Jamba Threat Model module")
@@ -55,36 +63,43 @@ class JambaThreatModel(nn.Module):
         """
         super(JambaThreatModel, self).__init__()
         
-        logger.info(f"Initializing JambaThreatModel with input dimension: {input_dim}")
-        
         try:
-            # Simplify the attention head logic by using a fixed embedding dimension
-            self.orig_input_dim = input_dim
-            self.embed_dim = 128  # Fixed embedding dimension that is divisible by common head counts
-            self.num_heads = 4    # Fixed number of attention heads
+            logger.info(f"Initializing JambaThreatModel with input dimension: {input_dim}")
             
-            # Always use an embedding layer to project to the fixed dimension
-            self.embedding = nn.Linear(input_dim, self.embed_dim)
-            logger.info(f"Using embedding layer: {input_dim} -> {self.embed_dim} with {self.num_heads} attention heads")
-                
-            # Multi-head self-attention layer
-            self.attention = nn.MultiheadAttention(embed_dim=self.embed_dim, num_heads=self.num_heads)
+            # Important: Use a fixed embed_dim for consistency across all models
+            self.embed_dim = 28  # Match the input dimension exactly for consistency
             
-            # Feature extraction
+            # Fixed number of attention heads
+            num_heads = 4
+            logger.info(f"Using {num_heads} attention heads")
+            
+            # Multi-head attention layer
+            self.attention = nn.MultiheadAttention(
+                embed_dim=self.embed_dim, 
+                num_heads=num_heads,
+                batch_first=True
+            )
+            
+            # Feature extraction layers
             self.fc1 = nn.Linear(self.embed_dim, 256)
             self.relu1 = nn.ReLU()
             self.dropout1 = nn.Dropout(0.3)
             
-            # Further feature processing
             self.fc2 = nn.Linear(256, 128)
             self.relu2 = nn.ReLU()
             self.dropout2 = nn.Dropout(0.2)
             
-            # Temporal processing using GRU (faster than LSTM)
-            self.temporal = nn.GRU(128, 64, batch_first=True, bidirectional=True)
+            # Bidirectional GRU for temporal processing
+            self.temporal = nn.GRU(
+                input_size=128,
+                hidden_size=64,
+                num_layers=1,
+                batch_first=True,
+                bidirectional=True
+            )
             
             # Output layers
-            self.fc3 = nn.Linear(128, 64)
+            self.fc3 = nn.Linear(128, 64)  # 128 = 64*2 (bidirectional)
             self.relu3 = nn.ReLU()
             self.dropout3 = nn.Dropout(0.1)
             self.fc4 = nn.Linear(64, 32)
@@ -107,39 +122,27 @@ class JambaThreatModel(nn.Module):
             Output tensor of shape (batch_size, 1)
         """
         try:
-            # Apply embedding if needed
-            x = self.embedding(x)
-            
-            # Self-attention
             # Reshape for attention: (batch_size, seq_len=1, embed_dim)
             x_reshaped = x.unsqueeze(1)
             
-            # Apply attention - PyTorch expects (seq_len, batch_size, embed_dim)
-            x_att, _ = self.attention(
-                x_reshaped.transpose(0, 1),
-                x_reshaped.transpose(0, 1),
-                x_reshaped.transpose(0, 1)
-            )
-            
-            # Convert back to (batch_size, embed_dim)
-            x_att = x_att.transpose(0, 1).squeeze(1)
+            # Apply attention (with batch_first=True)
+            x_att, _ = self.attention(x_reshaped, x_reshaped, x_reshaped)
+            x_att = x_att.squeeze(1)
             
             # Feature extraction
             x = self.fc1(x_att)
             x = self.relu1(x)
             x = self.dropout1(x)
             
-            # Further feature processing
             x = self.fc2(x)
             x = self.relu2(x)
             x = self.dropout2(x)
             
-            # Temporal processing - needs (batch_size, seq_len, features)
-            x_temporal = x.unsqueeze(1)  # Add sequence dimension
+            # Temporal processing (batch_size, seq_len=1, features)
+            x_temporal = x.unsqueeze(1)
             temporal_out, _ = self.temporal(x_temporal)
             
-            # Flatten the output (batch_size, seq_len=1, 2*hidden_size)
-            # The *2 is because we're using bidirectional
+            # Flatten the output (bidirectional doubles the last dimension)
             temporal_out = temporal_out.reshape(temporal_out.size(0), -1)
             
             # Output layers
@@ -160,14 +163,32 @@ if __name__ == "__main__":
     logger.info("Testing JambaThreatModel...")
     # Create a sample input tensor
     batch_size = 4
-    input_dim = 18  # Number of features
+    input_dim = 28  # Match expected dimension for dataset features
     sample_input = torch.randn(batch_size, input_dim)
     
     # Initialize the model
     model = JambaThreatModel(input_dim)
     
-    # Run a forward pass
-    output = model(sample_input)
+    # Set eval mode for consistent output
+    model.eval()
     
-    logger.info(f"Model output shape: {output.shape}")
+    # Test serialization
+    buffer = io.BytesIO()
+    torch.save(model.state_dict(), buffer)
+    buffer.seek(0)
+    
+    # Load the model in a new instance
+    model2 = JambaThreatModel(input_dim)
+    model2.load_state_dict(torch.load(buffer))
+    model2.eval()
+    
+    # Compare outputs
+    with torch.no_grad():
+        output1 = model(sample_input)
+        output2 = model2(sample_input)
+    
+    # Verify outputs match
+    match = torch.allclose(output1, output2)
+    logger.info(f"Serialization test {'passed' if match else 'failed'}")
+    logger.info(f"Model output shape: {output1.shape}")
     logger.info("Model test completed successfully") 
