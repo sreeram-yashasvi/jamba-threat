@@ -1,315 +1,296 @@
 """
-Validation utilities for Jamba Threat Detection model.
-Centralizes health checks, model validation, and environment validation.
+Validation utilities for Jamba Threat Detection.
+
+This module provides functions for validating the environment, model,
+and other components of the Jamba Threat Detection system.
 """
 
 import os
 import sys
-import json
-import logging
-import torch
 import io
+import logging
 import importlib
+import importlib.util
+import torch
 import traceback
+import json
 import requests
-from pathlib import Path
+from time import sleep
 
 # Set up logging
-logging.basicConfig(
-    level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
-)
 logger = logging.getLogger(__name__)
 
-# Import environment module (local import to avoid circular dependencies)
-try:
-    from utils import environment
-except ImportError:
-    # Adjust path if running as main script
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    if parent_dir not in sys.path:
-        sys.path.append(parent_dir)
-    try:
-        from utils import environment
-    except ImportError:
-        logger.error("Could not import environment module")
-        environment = None
-
-def check_environment_variables():
+def check_python_modules(required_modules=None):
     """
-    Check if required environment variables are set.
+    Check if required Python modules are available.
     
+    Args:
+        required_modules (list): List of module names to check
+        
     Returns:
-        tuple: (bool, list) - Success flag and list of missing variables
+        tuple: (bool, list) - Success flag and list of missing modules
     """
-    if environment:
-        return environment.check_environment_variables()
+    if required_modules is None:
+        required_modules = ["torch", "numpy", "pandas", "runpod"]
     
-    # Fallback if environment module not available
-    required_vars = ["RUNPOD_API_KEY", "RUNPOD_ENDPOINT_ID"]
-    missing_vars = [var for var in required_vars if not os.environ.get(var)]
+    missing_modules = []
+    for module in required_modules:
+        try:
+            importlib.import_module(module)
+            logger.info(f"✓ Module {module} is available")
+        except ImportError:
+            logger.warning(f"✗ Module {module} is NOT available")
+            missing_modules.append(module)
     
-    if missing_vars:
-        logger.warning(f"Missing environment variables: {', '.join(missing_vars)}")
-        return False, missing_vars
-    
-    return True, []
+    return len(missing_modules) == 0, missing_modules
 
 def check_cuda_availability():
     """
-    Check if CUDA is available and get CUDA information.
+    Check if CUDA is available and get GPU information.
     
     Returns:
-        dict: CUDA availability information
+        dict: CUDA and GPU information
     """
     cuda_info = {
         "cuda_available": torch.cuda.is_available(),
-        "device": str(torch.device("cuda" if torch.cuda.is_available() else "cpu")),
+        "cuda_version": torch.version.cuda if torch.cuda.is_available() else "N/A",
+        "device_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+        "current_device": None,
+        "device_name": None,
+        "device_capability": None,
+        "total_memory_mb": None
     }
     
     if cuda_info["cuda_available"]:
-        cuda_info.update({
-            "cuda_version": torch.version.cuda,
-            "device_count": torch.cuda.device_count(),
-            "device_name": torch.cuda.get_device_name(0) if torch.cuda.device_count() > 0 else None,
-            "device_capability": torch.cuda.get_device_capability(0) if torch.cuda.device_count() > 0 else None
-        })
-    
-    logger.info(f"CUDA available: {cuda_info['cuda_available']}")
-    if cuda_info["cuda_available"]:
-        logger.info(f"CUDA version: {cuda_info['cuda_version']}")
-        logger.info(f"GPU count: {cuda_info['device_count']}")
+        logger.info(f"✓ CUDA is available (version {cuda_info['cuda_version']})")
+        logger.info(f"  Device count: {cuda_info['device_count']}")
+        
+        # Get information about the first device
+        if cuda_info["device_count"] > 0:
+            cuda_info["current_device"] = torch.cuda.current_device()
+            props = torch.cuda.get_device_properties(cuda_info["current_device"])
+            cuda_info["device_name"] = props.name
+            cuda_info["device_capability"] = f"{props.major}.{props.minor}"
+            cuda_info["total_memory_mb"] = props.total_memory / (1024 * 1024)
+            
+            logger.info(f"  Device name: {cuda_info['device_name']}")
+            logger.info(f"  Compute capability: {cuda_info['device_capability']}")
+            logger.info(f"  Total memory: {cuda_info['total_memory_mb']:.2f} MB")
+    else:
+        logger.warning("✗ CUDA is NOT available - running in CPU mode")
     
     return cuda_info
 
 def check_model_imports():
     """
-    Check if the model classes can be imported.
+    Check if Jamba model classes can be imported.
     
     Returns:
-        tuple: (bool, dict) - Success flag and import results
+        tuple: (success_flag, error_message, import_path)
     """
-    import_results = {
-        "jamba_model": False,
-        "ThreatDataset": False,
-        "JambaThreatModel": False,
-        "import_path": None,
-        "error": None
-    }
+    # Try different import strategies with informative logging
+    import_attempts = [
+        ("Direct import", lambda: importlib.import_module("jamba_model")),
+        ("From src", lambda: importlib.import_module("src.jamba_model")),
+        ("With path adjustment", lambda: _import_with_path_adjustment("jamba_model"))
+    ]
     
-    try:
-        # Try direct import
-        import jamba_model
-        import_results["jamba_model"] = True
-        import_results["import_path"] = jamba_model.__file__
-        
-        # Check for required classes
-        if hasattr(jamba_model, "ThreatDataset"):
-            import_results["ThreatDataset"] = True
-        
-        if hasattr(jamba_model, "JambaThreatModel"):
-            import_results["JambaThreatModel"] = True
-        
-        logger.info(f"Successfully imported jamba_model from {import_results['import_path']}")
-        return all([import_results["ThreatDataset"], import_results["JambaThreatModel"]]), import_results
-    
-    except ImportError as e:
-        import_results["error"] = str(e)
-        logger.warning(f"Failed to import jamba_model directly: {e}")
-        
-        # Try adjusting sys.path
-        current_dir = os.path.dirname(os.path.abspath(__file__))
-        parent_dir = os.path.dirname(current_dir)
-        potential_paths = [
-            parent_dir,
-            os.path.dirname(parent_dir),
-            os.path.join(os.path.dirname(parent_dir), "src")
-        ]
-        
-        for path in potential_paths:
-            if path not in sys.path:
-                logger.info(f"Adding {path} to sys.path")
-                sys.path.append(path)
-        
+    for description, import_func in import_attempts:
         try:
-            import jamba_model
-            import_results["jamba_model"] = True
-            import_results["import_path"] = jamba_model.__file__
+            logger.info(f"Attempting import using {description}")
+            module = import_func()
             
-            # Check for required classes
-            if hasattr(jamba_model, "ThreatDataset"):
-                import_results["ThreatDataset"] = True
-            
-            if hasattr(jamba_model, "JambaThreatModel"):
-                import_results["JambaThreatModel"] = True
-            
-            logger.info(f"Successfully imported jamba_model after path adjustment from {import_results['import_path']}")
-            return all([import_results["ThreatDataset"], import_results["JambaThreatModel"]]), import_results
-        
-        except ImportError as e:
-            import_results["error"] = str(e)
-            logger.error(f"Failed to import jamba_model after path adjustment: {e}")
-            logger.info(f"Current sys.path: {sys.path}")
-            return False, import_results
+            # Verify specific classes exist in the module
+            if hasattr(module, "JambaThreatModel") and hasattr(module, "ThreatDataset"):
+                logger.info(f"✓ Successfully imported model classes using {description}")
+                return True, None, module.__file__
+            else:
+                logger.warning(f"✗ Module found but missing required classes using {description}")
+        except Exception as e:
+            logger.warning(f"✗ Import failed using {description}: {str(e)}")
+    
+    # If all attempts failed, provide diagnostic information
+    logger.error("✗ All import attempts failed")
+    logger.info(f"Python path: {sys.path}")
+    logger.info(f"Current directory: {os.getcwd()}")
+    
+    return False, "Could not import Jamba model classes", None
 
-def test_model_initialization(input_dim=28):
+def _import_with_path_adjustment(module_name):
     """
-    Test if the model can be initialized.
+    Try to import a module after adjusting the Python path.
     
     Args:
-        input_dim: Input dimension for the model
+        module_name (str): Name of the module to import
         
     Returns:
-        tuple: (bool, dict) - Success flag and initialization results
+        module: Imported module object
     """
-    results = {
-        "model_initialized": False,
-        "forward_pass_successful": False,
-        "output_shape": None,
-        "error": None,
-        "model_parameters": {}
-    }
+    # Add common paths to sys.path
+    app_dir = os.environ.get("APP_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+    src_dir = os.path.join(app_dir, "src")
     
+    for path in [app_dir, src_dir]:
+        if path not in sys.path:
+            sys.path.append(path)
+            logger.info(f"Added {path} to sys.path")
+    
+    # Try to find the module spec
+    spec = importlib.util.find_spec(module_name)
+    if spec is None:
+        raise ImportError(f"Could not find module {module_name} after path adjustment")
+    
+    # Load the module
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+def test_model_initialization():
+    """
+    Test if the model can be initialized and performs a forward pass.
+    
+    Returns:
+        tuple: (success_flag, error_message, model_info)
+    """
     try:
-        # Check if model can be imported
-        success, import_results = check_model_imports()
-        if not success:
-            results["error"] = f"Failed to import model classes: {import_results['error']}"
-            return False, results
+        # First check if we can import the model
+        import_success, import_error, _ = check_model_imports()
+        if not import_success:
+            return False, import_error, None
         
-        # Import the model
+        # Import the model class
         from jamba_model import JambaThreatModel
         
         # Initialize the model
-        model = JambaThreatModel(input_dim)
-        results["model_initialized"] = True
-        
-        # Log model parameters
-        for name, param in model.named_parameters():
-            results["model_parameters"][name] = list(param.shape)
-        
-        # Test forward pass
-        sample_input = torch.randn(4, input_dim)
-        output = model(sample_input)
-        results["forward_pass_successful"] = True
-        results["output_shape"] = list(output.shape)
-        
-        logger.info(f"Model initialized successfully. Output shape: {results['output_shape']}")
-        return True, results
-    
-    except Exception as e:
-        results["error"] = str(e)
-        logger.error(f"Error initializing model: {e}")
-        logger.error(traceback.format_exc())
-        return False, results
-
-def test_model_serialization(input_dim=28):
-    """
-    Test if the model can be serialized and deserialized.
-    
-    Args:
-        input_dim: Input dimension for the model
-        
-    Returns:
-        tuple: (bool, dict) - Success flag and serialization results
-    """
-    results = {
-        "serialization_successful": False,
-        "deserialization_successful": False,
-        "outputs_match": False,
-        "error": None
-    }
-    
-    try:
-        # Check if model can be imported
-        success, import_results = check_model_imports()
-        if not success:
-            results["error"] = f"Failed to import model classes: {import_results['error']}"
-            return False, results
-        
-        # Import the model
-        from jamba_model import JambaThreatModel
+        input_dim = 28  # Default dimension for threat features
+        logger.info(f"Initializing model with input_dim={input_dim}")
         
         # Set deterministic mode for reproducibility
         torch.manual_seed(42)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(42)
         
-        # Initialize the model
         model = JambaThreatModel(input_dim)
-        model.eval()
+        model.eval()  # Set to evaluation mode
         
-        # Serialize the model
+        # Create a sample input and run a forward pass
+        sample_input = torch.randn(4, input_dim)
+        with torch.no_grad():
+            output = model(sample_input)
+        
+        model_info = {
+            "model_type": type(model).__name__,
+            "input_dim": input_dim,
+            "output_shape": list(output.shape),
+            "parameter_count": sum(p.numel() for p in model.parameters()),
+            "layers": str(model).count("\n") + 1
+        }
+        
+        logger.info(f"✓ Model initialized successfully")
+        logger.info(f"  Output shape: {output.shape}")
+        logger.info(f"  Parameter count: {model_info['parameter_count']}")
+        
+        # Log model structure information
+        if logger.level <= logging.INFO:
+            logger.info("Model structure overview:")
+            for name, param in model.named_parameters():
+                logger.info(f"  {name}: {param.shape}")
+        
+        return True, None, model_info
+        
+    except Exception as e:
+        error_msg = f"Model initialization failed: {str(e)}"
+        logger.error(f"✗ {error_msg}")
+        logger.error(traceback.format_exc())
+        return False, error_msg, None
+
+def test_model_serialization():
+    """
+    Test if the model can be serialized and deserialized correctly.
+    
+    Returns:
+        tuple: (success_flag, error_message)
+    """
+    try:
+        # First check if we can import the model
+        import_success, import_error, _ = check_model_imports()
+        if not import_success:
+            return False, import_error
+        
+        # Import the model class
+        from jamba_model import JambaThreatModel
+        
+        # Set deterministic mode for reproducibility
+        torch.manual_seed(42)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(42)
+            
+        # Create test model
+        input_dim = 28
+        model = JambaThreatModel(input_dim)
+        model.eval()  # Set to evaluation mode
+        
+        # Serialize model
         buffer = io.BytesIO()
         torch.save(model.state_dict(), buffer)
         buffer.seek(0)
-        results["serialization_successful"] = True
         
-        # Set different seed to ensure proper serialization test
+        # Use different seed to ensure we're testing proper serialization
         torch.manual_seed(100)
         if torch.cuda.is_available():
             torch.cuda.manual_seed_all(100)
         
-        # Deserialize the model
+        # Load state dictionary to new model
+        state_dict = torch.load(buffer)
         new_model = JambaThreatModel(input_dim)
-        new_model.load_state_dict(torch.load(buffer))
-        new_model.eval()
-        results["deserialization_successful"] = True
+        new_model.load_state_dict(state_dict)
+        new_model.eval()  # Set to evaluation mode
         
-        # Test with fixed input
-        torch.manual_seed(42)
+        # Create fixed test input and run inference
+        torch.manual_seed(42)  # Reset seed for consistent input
         sample_input = torch.randn(4, input_dim)
         
-        # Compare outputs
         with torch.no_grad():
             output1 = model(sample_input)
             output2 = new_model(sample_input)
         
-        # Check if outputs match
-        results["outputs_match"] = torch.allclose(output1, output2, rtol=1e-5, atol=1e-5)
+        # Compare outputs with a tolerance
+        match = torch.allclose(output1, output2, rtol=1e-5, atol=1e-5)
         
-        if not results["outputs_match"]:
-            results["error"] = f"Outputs don't match. Max diff: {(output1 - output2).abs().max().item()}"
-            logger.error(results["error"])
+        if match:
+            logger.info("✓ Model serialization and loading successful")
+            return True, None
         else:
-            logger.info("Model serialization test successful")
-        
-        return results["outputs_match"], results
-    
+            max_diff = (output1 - output2).abs().max().item()
+            error_msg = f"Model outputs don't match after serialization (max diff = {max_diff})"
+            logger.error(f"✗ {error_msg}")
+            return False, error_msg
+            
     except Exception as e:
-        results["error"] = str(e)
-        logger.error(f"Error testing model serialization: {e}")
+        error_msg = f"Model serialization test failed: {str(e)}"
+        logger.error(f"✗ {error_msg}")
         logger.error(traceback.format_exc())
-        return False, results
+        return False, error_msg
 
-def verify_runpod_endpoint(api_key=None, endpoint_id=None):
+def verify_runpod_endpoint(api_key, endpoint_id, max_retries=3):
     """
-    Verify that the RunPod endpoint is reachable and functioning.
+    Verify that a RunPod endpoint is reachable and functioning.
     
     Args:
-        api_key: RunPod API key
-        endpoint_id: RunPod endpoint ID
+        api_key (str): RunPod API key
+        endpoint_id (str): RunPod endpoint ID
+        max_retries (int): Maximum number of retries
         
     Returns:
-        tuple: (bool, dict) - Success flag and verification results
+        tuple: (success_flag, message, response)
     """
-    results = {
-        "endpoint_reachable": False,
-        "health_check_successful": False,
-        "error": None
-    }
-    
-    # Use environment variables if not provided
-    api_key = api_key or os.environ.get("RUNPOD_API_KEY")
-    endpoint_id = endpoint_id or os.environ.get("RUNPOD_ENDPOINT_ID")
-    
     if not api_key or not endpoint_id:
-        results["error"] = "API key and endpoint ID are required"
-        logger.error(results["error"])
-        return False, results
+        logger.error("API key and endpoint ID are required")
+        return False, "API key and endpoint ID are required", None
     
-    # Check if endpoint exists
+    logger.info(f"Verifying RunPod endpoint {endpoint_id}")
+    
+    # First, check if endpoint exists
     try:
         headers = {
             "Authorization": f"Bearer {api_key}"
@@ -319,171 +300,266 @@ def verify_runpod_endpoint(api_key=None, endpoint_id=None):
         logger.info(f"Checking endpoint health at {health_url}")
         response = requests.get(health_url, headers=headers)
         
-        if response.status_code == 200:
-            results["endpoint_reachable"] = True
-            results["health_check_successful"] = True
-            results["health_response"] = response.json()
-            logger.info(f"Endpoint health check successful: {response.json()}")
-        else:
-            results["endpoint_reachable"] = True
-            results["error"] = f"Endpoint health check failed: {response.status_code} - {response.text}"
-            logger.error(results["error"])
+        if response.status_code != 200:
+            error_msg = f"Endpoint health check failed with status code {response.status_code}"
+            logger.error(f"✗ {error_msg}")
+            return False, error_msg, response.json() if response.text else None
+            
+        health_data = response.json()
+        if not health_data.get("success", False):
+            error_msg = f"Endpoint health check returned error: {health_data.get('error', 'Unknown error')}"
+            logger.error(f"✗ {error_msg}")
+            return False, error_msg, health_data
+            
+        logger.info(f"✓ Endpoint health check successful")
         
-        return results["health_check_successful"], results
-    
+        # Now send a test job to verify functionality
+        run_url = f"https://api.runpod.io/v2/{endpoint_id}/run"
+        payload = {
+            "input": {
+                "operation": "health"
+            }
+        }
+        
+        logger.info(f"Sending test health check job to {run_url}")
+        response = requests.post(run_url, headers=headers, json=payload)
+        
+        if response.status_code != 200:
+            error_msg = f"Test job submission failed with status code {response.status_code}"
+            logger.error(f"✗ {error_msg}")
+            return False, error_msg, response.json() if response.text else None
+            
+        job_data = response.json()
+        job_id = job_data.get("id")
+        
+        if not job_id:
+            error_msg = "Test job submission did not return a job ID"
+            logger.error(f"✗ {error_msg}")
+            return False, error_msg, job_data
+            
+        logger.info(f"✓ Test job submitted successfully with ID {job_id}")
+        
+        # Poll for job status
+        status_url = f"https://api.runpod.io/v2/{endpoint_id}/status/{job_id}"
+        
+        for attempt in range(max_retries):
+            logger.info(f"Checking job status (attempt {attempt + 1}/{max_retries})")
+            response = requests.get(status_url, headers=headers)
+            
+            if response.status_code != 200:
+                logger.warning(f"Status check failed with code {response.status_code}, retrying...")
+                sleep(2)
+                continue
+                
+            status_data = response.json()
+            status = status_data.get("status")
+            
+            if status == "COMPLETED":
+                logger.info(f"✓ Test job completed successfully")
+                return True, "Endpoint verification successful", status_data
+            elif status == "FAILED":
+                error_msg = f"Test job failed: {status_data.get('error', 'Unknown error')}"
+                logger.error(f"✗ {error_msg}")
+                return False, error_msg, status_data
+            elif status in ["IN_QUEUE", "IN_PROGRESS"]:
+                logger.info(f"Job status: {status}, waiting...")
+                sleep(2)
+            else:
+                logger.warning(f"Unknown job status: {status}, waiting...")
+                sleep(2)
+        
+        logger.error(f"✗ Test job timed out after {max_retries} attempts")
+        return False, "Test job timed out", None
+            
     except Exception as e:
-        results["error"] = str(e)
-        logger.error(f"Error checking endpoint health: {e}")
-        return False, results
+        error_msg = f"Endpoint verification failed: {str(e)}"
+        logger.error(f"✗ {error_msg}")
+        logger.error(traceback.format_exc())
+        return False, error_msg, None
 
-def run_health_check():
+def health_check():
     """
-    Run a comprehensive health check on the model and environment.
+    Perform a comprehensive health check of the system.
     
     Returns:
         dict: Health check results
     """
-    health_results = {
+    results = {
         "timestamp": None,
-        "environment_variables": None,
-        "cuda_availability": None,
-        "model_imports": None,
-        "model_initialization": None,
-        "model_serialization": None,
-        "endpoint_verification": None,
         "status": "unhealthy",
-        "issues": []
+        "success": False,
+        "python_version": sys.version,
+        "pytorch_version": torch.__version__,
+        "cuda": check_cuda_availability(),
+        "model_imports": {"success": False},
+        "model_initialization": {"success": False},
+        "environment_variables": {"success": False}
+    }
+    
+    try:
+        # Check model imports
+        import_success, import_error, import_path = check_model_imports()
+        results["model_imports"] = {
+            "success": import_success,
+            "error": import_error,
+            "path": import_path
+        }
+        
+        # Check model initialization
+        if import_success:
+            init_success, init_error, model_info = test_model_initialization()
+            results["model_initialization"] = {
+                "success": init_success,
+                "error": init_error,
+                "info": model_info
+            }
+        
+        # Check environment variables
+        from src.utils.environment import check_environment_variables
+        missing_vars, available_vars = check_environment_variables()
+        results["environment_variables"] = {
+            "success": len(missing_vars) == 0,
+            "missing": missing_vars,
+            "available": {k: "Set" for k, v in available_vars.items() if v}
+        }
+        
+        # Determine overall status
+        critical_checks = [
+            results["model_imports"]["success"],
+            results["model_initialization"]["success"]
+        ]
+        
+        results["success"] = all(critical_checks)
+        results["status"] = "healthy" if results["success"] else "unhealthy"
+        
+        import datetime
+        results["timestamp"] = datetime.datetime.now().isoformat()
+        
+        return results
+        
+    except Exception as e:
+        logger.error(f"Health check failed: {str(e)}")
+        logger.error(traceback.format_exc())
+        results["error"] = str(e)
+        return results
+
+def run_validation_checks(skip_endpoint_check=False, api_key=None, endpoint_id=None):
+    """
+    Run all validation checks and return a comprehensive report.
+    
+    Args:
+        skip_endpoint_check (bool): Whether to skip endpoint verification
+        api_key (str): RunPod API key
+        endpoint_id (str): RunPod endpoint ID
+        
+    Returns:
+        dict: Validation check results
+    """
+    import datetime
+    
+    results = {
+        "timestamp": datetime.datetime.now().isoformat(),
+        "success": False,
+        "checks": {}
     }
     
     # Check environment variables
-    env_ok, env_results = check_environment_variables()
-    health_results["environment_variables"] = {
-        "success": env_ok,
-        "missing": env_results if not env_ok else []
+    from src.utils.environment import check_environment_variables
+    missing_vars, available_vars = check_environment_variables()
+    results["checks"]["environment_variables"] = {
+        "success": len(missing_vars) == 0,
+        "missing": missing_vars,
+        "available": {k: "Set" for k, v in available_vars.items() if v}
     }
     
-    if not env_ok:
-        health_results["issues"].append(f"Missing environment variables: {', '.join(env_results)}")
+    # Check required Python modules
+    modules_success, missing_modules = check_python_modules()
+    results["checks"]["python_modules"] = {
+        "success": modules_success,
+        "missing": missing_modules
+    }
     
     # Check CUDA availability
-    health_results["cuda_availability"] = check_cuda_availability()
+    results["checks"]["cuda"] = check_cuda_availability()
     
     # Check model imports
-    import_ok, import_results = check_model_imports()
-    health_results["model_imports"] = {
-        "success": import_ok,
-        "details": import_results
+    import_success, import_error, import_path = check_model_imports()
+    results["checks"]["model_imports"] = {
+        "success": import_success,
+        "error": import_error,
+        "path": import_path
     }
-    
-    if not import_ok:
-        health_results["issues"].append(f"Model import issues: {import_results['error']}")
     
     # Check model initialization
-    init_ok, init_results = test_model_initialization()
-    health_results["model_initialization"] = {
-        "success": init_ok,
-        "details": init_results
-    }
-    
-    if not init_ok:
-        health_results["issues"].append(f"Model initialization issues: {init_results['error']}")
-    
-    # Check model serialization
-    serial_ok, serial_results = test_model_serialization()
-    health_results["model_serialization"] = {
-        "success": serial_ok,
-        "details": serial_results
-    }
-    
-    if not serial_ok:
-        health_results["issues"].append(f"Model serialization issues: {serial_results['error']}")
-    
-    # Check endpoint if environment variables are set
-    if env_ok:
-        endpoint_ok, endpoint_results = verify_runpod_endpoint()
-        health_results["endpoint_verification"] = {
-            "success": endpoint_ok,
-            "details": endpoint_results
+    if import_success:
+        init_success, init_error, model_info = test_model_initialization()
+        results["checks"]["model_initialization"] = {
+            "success": init_success,
+            "error": init_error,
+            "info": model_info
         }
         
-        if not endpoint_ok:
-            health_results["issues"].append(f"Endpoint verification issues: {endpoint_results['error']}")
+        # Check model serialization
+        if init_success:
+            serial_success, serial_error = test_model_serialization()
+            results["checks"]["model_serialization"] = {
+                "success": serial_success,
+                "error": serial_error
+            }
     
-    # Determine overall status
-    if not health_results["issues"]:
-        health_results["status"] = "healthy"
+    # Check RunPod endpoint
+    if not skip_endpoint_check:
+        if not api_key or not endpoint_id:
+            # Try to get from environment
+            api_key = os.environ.get("RUNPOD_API_KEY")
+            endpoint_id = os.environ.get("RUNPOD_ENDPOINT_ID")
+            
+        if api_key and endpoint_id:
+            endpoint_success, endpoint_msg, _ = verify_runpod_endpoint(api_key, endpoint_id)
+            results["checks"]["runpod_endpoint"] = {
+                "success": endpoint_success,
+                "message": endpoint_msg
+            }
+        else:
+            results["checks"]["runpod_endpoint"] = {
+                "success": False,
+                "message": "API key or endpoint ID not provided"
+            }
+    else:
+        results["checks"]["runpod_endpoint"] = {
+            "success": True,
+            "message": "Endpoint check skipped"
+        }
     
-    import datetime
-    health_results["timestamp"] = datetime.datetime.now().isoformat()
+    # Determine overall success
+    # Critical checks: model_imports, model_initialization, model_serialization
+    critical_checks = [
+        results["checks"].get("model_imports", {}).get("success", False),
+        results["checks"].get("model_initialization", {}).get("success", False),
+        results["checks"].get("model_serialization", {}).get("success", False)
+    ]
     
-    logger.info(f"Health check completed. Status: {health_results['status']}")
-    if health_results["issues"]:
-        logger.warning(f"Health check issues: {health_results['issues']}")
+    results["success"] = all(critical_checks)
     
-    return health_results
-
-def generate_shell_validation_script():
-    """
-    Generate a shell script for validation that can be called from bash.
-    
-    Returns:
-        str: Shell script content
-    """
-    script = """#!/bin/bash
-set -e
-
-# Function to log with timestamps
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
-
-log "Running Jamba Threat Model validation..."
-
-# Run Python validation script
-python -c "
-import sys
-import os
-import json
-
-# Add paths
-sys.path.append('/app')
-sys.path.append('/app/src')
-sys.path.append('.')
-sys.path.append('./src')
-
-try:
-    from utils.validation import run_health_check
-    
-    # Run health check
-    results = run_health_check()
-    
-    # Print results
-    print(json.dumps(results, indent=2))
-    
-    # Set exit code based on health status
-    sys.exit(0 if results['status'] == 'healthy' else 1)
-except Exception as e:
-    print(f'Validation script error: {str(e)}')
-    sys.exit(1)
-"
-
-# Store the exit code
-validation_result=$?
-
-if [ $validation_result -eq 0 ]; then
-    log "✓ Validation completed successfully"
-    exit 0
-else
-    log "✗ Validation failed"
-    exit 1
-fi
-"""
-    return script
+    return results
 
 if __name__ == "__main__":
-    # When run directly, perform a health check
-    results = run_health_check()
-    print(json.dumps(results, indent=2))
+    # Set up logging
+    logging.basicConfig(
+        level=logging.INFO,
+        format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    )
     
-    # Exit with appropriate code
-    sys.exit(0 if results["status"] == "healthy" else 1) 
+    # Run a quick health check
+    logger.info("Running health check...")
+    health_results = health_check()
+    
+    # Print results in a readable format
+    logger.info(f"Health check status: {health_results['status']}")
+    for check, result in health_results.items():
+        if isinstance(result, dict) and 'success' in result:
+            status = "✓" if result["success"] else "✗"
+            logger.info(f"{check}: {status}")
+    
+    # Exit with status code
+    sys.exit(0 if health_results["success"] else 1) 

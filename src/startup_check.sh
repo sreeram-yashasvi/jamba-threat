@@ -6,23 +6,35 @@ log() {
     echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
 }
 
-# Function to check if a Python module can be imported
-check_module() {
-    local module=$1
-    log "Checking for module: $module"
-    python -c "import $module" 2>/dev/null
-    if [ $? -eq 0 ]; then
-        log "✓ Module $module is available"
+# Function to check if the Python utility script is available
+check_utility_script() {
+    if [ -f "${APP_DIR}/src/utils/shell.py" ]; then
+        log "✓ Utility script found at ${APP_DIR}/src/utils/shell.py"
         return 0
     else
-        log "✗ Module $module is NOT available"
+        log "✗ Utility script not found at ${APP_DIR}/src/utils/shell.py"
+        
+        # Check if utils directory exists
+        if [ ! -d "${APP_DIR}/src/utils" ]; then
+            log "  Creating utils directory"
+            mkdir -p "${APP_DIR}/src/utils"
+        fi
+        
+        log "✗ Cannot proceed without utility script. Please ensure it's properly installed."
         return 1
     fi
 }
 
-# Check file structure
+# Define app directory
+export APP_DIR="${APP_DIR:-/app}"
+export PYTHONPATH="${PYTHONPATH}:${APP_DIR}"
+
+log "Starting startup check..."
+log "APP_DIR is set to ${APP_DIR}"
+
+# Check for required directories
 log "Checking file structure..."
-for dir in "/app" "/app/src" "/app/models"; do
+for dir in "${APP_DIR}" "${APP_DIR}/src" "${APP_DIR}/models"; do
     if [ -d "$dir" ]; then
         log "✓ Directory $dir exists"
     else
@@ -32,106 +44,102 @@ for dir in "/app" "/app/src" "/app/models"; do
     fi
 done
 
-# Check for required files
-log "Checking for required files..."
-for file in "/app/src/handler.py" "/app/src/jamba_model.py"; do
+# Check for basic required files
+log "Checking for basic required files..."
+essential_files=()
+
+for file in "${APP_DIR}/src/handler.py" "${APP_DIR}/src/jamba_model.py"; do
     if [ -f "$file" ]; then
         log "✓ File $file exists"
     else
         log "✗ File $file does NOT exist"
-        exit 1
+        essential_files+=("$file")
     fi
 done
 
-# Check for required Python modules
-log "Checking for required Python modules..."
-missing_modules=0
-for module in "torch" "numpy" "pandas" "runpod"; do
-    check_module $module
-    if [ $? -ne 0 ]; then
-        missing_modules=$((missing_modules+1))
-    fi
-done
+if [ ${#essential_files[@]} -gt 0 ]; then
+    log "✗ Missing essential files: ${essential_files[*]}"
+    exit 1
+fi
 
-# Check if we can import our model
-log "Checking if we can import the model..."
-python -c "
+# Check if utility script is available
+if ! check_utility_script; then
+    log "Falling back to basic checks without utility script"
+    
+    # Basic Python module check
+    log "Checking for required Python modules..."
+    for module in "torch" "numpy" "pandas" "runpod"; do
+        if python -c "import $module" 2>/dev/null; then
+            log "✓ Module $module is available"
+        else
+            log "✗ Module $module is NOT available"
+            exit 1
+        fi
+    done
+    
+    # Basic CUDA check
+    log "Checking CUDA availability..."
+    if python -c "import torch; print(torch.cuda.is_available())" 2>/dev/null | grep -q "True"; then
+        log "✓ CUDA is available"
+    else
+        log "⚠️ CUDA is not available, running in CPU mode"
+    fi
+    
+    # Basic model import check
+    log "Checking if model can be imported..."
+    if python -c "
 import sys
-sys.path.append('/app')
-sys.path.append('/app/src')
+sys.path.append('${APP_DIR}')
+sys.path.append('${APP_DIR}/src')
 try:
     from jamba_model import JambaThreatModel
-    print('✓ Model class import successful')
+    print('Model import successful')
+    exit(0)
 except Exception as e:
-    print(f'✗ Model class import failed: {e}')
-    sys.exit(1)
-"
-model_import_result=$?
-
-# Check CUDA
-log "Checking CUDA availability..."
-cuda_available=$(python -c "import torch; print(int(torch.cuda.is_available()))")
-if [ "$cuda_available" -eq 1 ]; then
-    log "✓ CUDA is available"
-    
-    # Check CUDA version and device count
-    cuda_version=$(python -c "import torch; print(torch.version.cuda)")
-    device_count=$(python -c "import torch; print(torch.cuda.device_count())")
-    
-    log "  CUDA Version: $cuda_version"
-    log "  GPU Count: $device_count"
-    
-    # Check GPU memory
-    free_memory=$(python -c "import torch; print(torch.cuda.get_device_properties(0).total_memory)")
-    log "  Total GPU Memory: $((free_memory / (1024*1024))) MB"
+    print(f'Model import failed: {e}')
+    exit(1)
+" >/dev/null 2>&1; then
+        log "✓ Model class import successful"
+    else
+        log "✗ Model class import failed"
+        exit 1
+    fi
 else
-    log "⚠️ CUDA is NOT available - running in CPU mode"
-fi
-
-# Check if environment variables are set
-log "Checking environment variables..."
-env_issues=0
-
-if [ -z "${RUNPOD_API_KEY}" ]; then
-    log "⚠️ RUNPOD_API_KEY environment variable is not set"
-    env_issues=$((env_issues+1))
-fi
-
-if [ -z "${RUNPOD_ENDPOINT_ID}" ]; then
-    log "⚠️ RUNPOD_ENDPOINT_ID environment variable is not set"
-    env_issues=$((env_issues+1))
+    # Use utility script for complete checks
+    log "Using utility script for comprehensive checks"
+    
+    # Check Python modules
+    log "Checking Python modules..."
+    if "${APP_DIR}/src/utils/shell.py" check-model --quiet; then
+        log "✓ Model checks passed"
+    else
+        module_result=$?
+        log "✗ Model checks failed (exit code $module_result)"
+        
+        # Get detailed error information
+        "${APP_DIR}/src/utils/shell.py" check-model
+        
+        exit 1
+    fi
+    
+    # Check CUDA
+    log "Checking CUDA availability..."
+    "${APP_DIR}/src/utils/shell.py" check-cuda
+    
+    # Environment variables are not critical for startup, just warn
+    log "Checking environment variables..."
+    if "${APP_DIR}/src/utils/shell.py" check-env --quiet; then
+        log "✓ All environment variables are set"
+    else
+        log "⚠️ Some environment variables are missing (this is a warning only)"
+        # Show which variables are missing
+        "${APP_DIR}/src/utils/shell.py" check-env
+    fi
 fi
 
 # Check disk space
 log "Checking disk space..."
-df -h /app
+df -h "${APP_DIR}"
 
-# Summarize check results
-log "Startup check summary:"
-
-if [ $missing_modules -eq 0 ]; then
-    log "✓ All required Python modules are available"
-else
-    log "✗ Missing $missing_modules required Python module(s)"
-fi
-
-if [ $model_import_result -eq 0 ]; then
-    log "✓ Model class import successful"
-else
-    log "✗ Model class import failed"
-fi
-
-if [ $env_issues -eq 0 ]; then
-    log "✓ All environment variables are set"
-else
-    log "⚠️ $env_issues environment variables are missing"
-fi
-
-# Exit with success if everything is good, or warning if there are non-critical issues
-if [ $missing_modules -eq 0 ] && [ $model_import_result -eq 0 ]; then
-    log "✓ System is ready for operation"
-    exit 0
-else
-    log "✗ System has critical issues - see above for details"
-    exit 1
-fi 
+log "✓ System is ready for operation"
+exit 0 
