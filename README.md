@@ -424,6 +424,65 @@ huggingface-cli whoami
 python src/train_jamba.py --dataloader-num-workers 4
 ```
 
+## Troubleshooting RunPod Deployments
+
+If you encounter issues with RunPod container deployments, we've added several tools and improvements to help diagnose and fix problems:
+
+### Using the Health Check Script
+
+The repository includes a health check script that can verify if your RunPod endpoint is functioning correctly:
+
+```bash
+# Set your RunPod credentials
+export RUNPOD_API_KEY=your_api_key
+export RUNPOD_ENDPOINT_ID=your_endpoint_id
+
+# Run the health check
+./src/runpod_health_check.py
+```
+
+This will perform a basic health check and report detailed information about your endpoint's status.
+
+### Common RunPod Container Issues
+
+1. **Container Startup Failures**:
+   - The container now includes enhanced startup checks and logging
+   - Check the RunPod logs for detailed error messages
+   - The startup wrapper script will provide specific error information
+
+2. **Import Errors**:
+   - We've improved the module structure to be more robust
+   - The container performs validation checks during startup
+   - Any import errors will be clearly reported in the logs
+
+3. **Environment Variable Issues**:
+   - Make sure to set `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` in your RunPod environment
+   - You can also create a `.env` file in the container
+
+### Manual Container Validation
+
+If you need to manually verify a container:
+
+1. Connect to your RunPod instance via SSH
+2. Run the validation script:
+   ```bash
+   /app/startup_check.sh
+   ```
+3. Check the RunPod logs for detailed output:
+   ```bash
+   cat /var/log/runpod-worker.log
+   ```
+
+### Rebuilding the Container
+
+If you've updated the codebase, make sure your RunPod endpoint is using the latest version:
+
+1. Go to your RunPod dashboard
+2. Select your endpoint
+3. Click "Configuration"
+4. Under "Image", verify it's pointing to the correct branch/commit
+5. Click "Update" to rebuild with the latest changes
+
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.

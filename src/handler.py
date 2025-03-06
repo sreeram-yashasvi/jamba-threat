@@ -14,11 +14,17 @@ from torch.cuda.amp import autocast, GradScaler
 import torch.cuda.amp as amp
 import logging
 import runpod
+import sys
+import traceback
+from pathlib import Path
 
-# Configure logging
+# Configure detailed logging
 logging.basicConfig(
     level=logging.INFO,
-    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
+    format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
+    handlers=[
+        logging.StreamHandler(stream=sys.stdout)
+    ]
 )
 logger = logging.getLogger("jamba-threat-handler")
 
@@ -35,16 +41,38 @@ FEATURES = [
 # Print environment info
 logger.info(f"Python path: {os.environ.get('PYTHONPATH', 'Not set')}")
 logger.info(f"Current directory: {os.getcwd()}")
+logger.info(f"Files in current directory: {os.listdir('.')}")
+if os.path.exists('/app/jamba_model'):
+    logger.info(f"Files in jamba_model directory: {os.listdir('/app/jamba_model')}")
+    if os.path.exists('/app/jamba_model/__init__.py'):
+        with open('/app/jamba_model/__init__.py', 'r') as f:
+            logger.info(f"Contents of __init__.py: {f.read()}")
 
-# Import model classes
+# Global cache for loaded models to avoid reloading the same model
+model_cache = {}
+
+# Import model classes with detailed error reporting
 try:
     # Direct import from the properly installed module
+    logger.info("Attempting to import model classes...")
     from jamba_model import JambaThreatModel, ThreatDataset
     logger.info("Successfully imported model classes from jamba_model module")
 except ImportError as e:
     logger.error(f"Failed to import model classes: {e}")
-    logger.error("This is a critical error. Please check your installation and module structure.")
-    raise
+    logger.error(f"Python path: {sys.path}")
+    logger.error(f"Import error details: {traceback.format_exc()}")
+    
+    # Try to recover by adding to sys.path
+    logger.info("Attempting to recover by modifying sys.path...")
+    sys.path.append('/app')
+    try:
+        from jamba_model import JambaThreatModel, ThreatDataset
+        logger.info("Successfully imported after modifying sys.path")
+    except ImportError:
+        logger.error("Could not import even after modifying sys.path")
+        logger.error("This is a critical error. Container may need to be rebuilt.")
+        # We'll continue and let the handler fail if needed, as this gives more diagnostics
+        # than failing immediately
 
 # Global cache for loaded models to avoid reloading the same model
 _model_cache = {}
@@ -358,7 +386,20 @@ def _handler(event):
             
         operation = job_input.get("operation", "predict")
         
-        if operation == "train":
+        if operation == "health_check":
+            # Simple health check operation
+            return {
+                "status": "healthy",
+                "environment": {
+                    "python_version": sys.version,
+                    "torch_version": torch.__version__,
+                    "cuda_available": torch.cuda.is_available(),
+                    "gpu_count": torch.cuda.device_count() if torch.cuda.is_available() else 0,
+                    "cwd": os.getcwd(),
+                    "python_path": sys.path,
+                }
+            }
+        elif operation == "train":
             logger.info("Starting training job")
             
             # Get data and parameters from input
@@ -446,8 +487,8 @@ def _handler(event):
         
     except Exception as e:
         logger.error(f"Error in handler: {str(e)}")
-        logger.exception(e)
-        return {"error": f"Handler error: {str(e)}"}
+        logger.error(traceback.format_exc())
+        return {"status": "error", "message": str(e), "traceback": traceback.format_exc()}
 
 # This is the function that will be called by the RunPod serverless system
 def handler(event):
@@ -461,10 +502,13 @@ def handler(event):
 
 # Only register and start the server if run directly
 if __name__ == "__main__":
-    # Start server
-    print("Starting Jamba Threat Model server")
-    # Register the handler function with RunPod
-    runpod.serverless.start({"handler": handler})
+    logger.info("Starting Jamba Threat Handler")
+    try:
+        runpod.serverless.start({"handler": handler})
+    except Exception as e:
+        logger.error(f"Failed to start serverless function: {e}")
+        logger.error(traceback.format_exc())
+        sys.exit(1)
 else:
     # When imported as a module by runpod.serverless.start
     # we need to explicitly register our handler
