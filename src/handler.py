@@ -32,136 +32,19 @@ FEATURES = [
     'dns_tunneling', 'file_integrity', 'process_injection'
 ]
 
-# Print the python path and list directories to debug
-logger.info(f"PYTHONPATH: {os.environ.get('PYTHONPATH', 'Not set')}")
+# Print environment info
+logger.info(f"Python path: {os.environ.get('PYTHONPATH', 'Not set')}")
 logger.info(f"Current directory: {os.getcwd()}")
-logger.info(f"Files in current directory: {os.listdir('.')}")
-if os.path.exists('/app/jamba_model'):
-    logger.info(f"Files in /app/jamba_model: {os.listdir('/app/jamba_model')}")
 
-# Try importing model classes
+# Import model classes
 try:
-    logger.info("Attempting to import model classes...")
-    # Try different import approaches
-    try:
-        from jamba_model.model import JambaThreatModel, ThreatDataset
-        logger.info("Successfully imported from jamba_model.model")
-    except ImportError:
-        logger.info("Trying alternative import path...")
-        # Try direct import if module structure fails
-        import sys
-        sys.path.append('/app')
-        from jamba_model.model import JambaThreatModel, ThreatDataset
-        logger.info("Successfully imported with sys.path.append")
-    
-    logger.info("Successfully imported model classes")
+    # Direct import from the properly installed module
+    from jamba_model import JambaThreatModel, ThreatDataset
+    logger.info("Successfully imported model classes from jamba_model module")
 except ImportError as e:
-    logger.error(f"Import error: {str(e)}")
-    try:
-        # Check if file exists
-        logger.error(f"Current directory: {os.getcwd()}")
-        logger.error(f"Files in current directory: {os.listdir('.')}")
-        if os.path.exists('/app/jamba_model'):
-            logger.error(f"Files in jamba_model directory: {os.listdir('/app/jamba_model')}")
-        else:
-            logger.error("/app/jamba_model directory not found")
-            
-        # Try to write the model classes directly
-        logger.info("Attempting to create model classes directly...")
-        
-        # Define model classes inline as a last resort
-        class ThreatDataset(torch.utils.data.Dataset):
-            def __init__(self, features, targets):
-                if isinstance(features, pd.DataFrame):
-                    self.X = features.values.astype(np.float32)
-                else:
-                    self.X = features.astype(np.float32)
-                    
-                if isinstance(targets, pd.Series):
-                    self.y = targets.values.astype(np.float32)
-                else:
-                    self.y = targets.astype(np.float32)
-            
-            def __len__(self):
-                return len(self.X)
-            
-            def __getitem__(self, idx):
-                return self.X[idx], self.y[idx]
-                
-        class JambaThreatModel(torch.nn.Module):
-            def __init__(self, input_dim):
-                super(JambaThreatModel, self).__init__()
-                
-                # Make embed_dim divisible by num_heads
-                num_heads = 4
-                self.embed_dim = input_dim
-                
-                # Find a suitable number of heads that divides embed_dim
-                found_valid_heads = False
-                possible_heads = [4, 2, 7, 1]
-                
-                for heads in possible_heads:
-                    if input_dim % heads == 0:
-                        num_heads = heads
-                        found_valid_heads = True
-                        logger.info(f"Using {num_heads} attention heads")
-                        break
-                
-                # If no suitable head count found, pad the input dimension
-                if not found_valid_heads:
-                    self.embed_dim = ((input_dim + 3) // 4) * 4
-                    logger.info(f"Padding input dimension from {input_dim} to {self.embed_dim}")
-                    self.embedding = torch.nn.Linear(input_dim, self.embed_dim)
-                else:
-                    self.embedding = torch.nn.Identity()
-                    
-                self.attention = torch.nn.MultiheadAttention(embed_dim=self.embed_dim, num_heads=num_heads)
-                self.fc1 = torch.nn.Linear(self.embed_dim, 256)
-                self.relu1 = torch.nn.ReLU()
-                self.dropout1 = torch.nn.Dropout(0.3)
-                self.fc2 = torch.nn.Linear(256, 128)
-                self.relu2 = torch.nn.ReLU()
-                self.dropout2 = torch.nn.Dropout(0.2)
-                self.temporal = torch.nn.GRU(128, 64, batch_first=True, bidirectional=True)
-                self.fc3 = torch.nn.Linear(128, 64)
-                self.relu3 = torch.nn.ReLU()
-                self.dropout3 = torch.nn.Dropout(0.1)
-                self.fc4 = torch.nn.Linear(64, 32)
-                self.relu4 = torch.nn.ReLU()
-                self.output = torch.nn.Linear(32, 1)
-            
-            def forward(self, x):
-                x = self.embedding(x)
-                x_reshaped = x.unsqueeze(1)
-                x_att, _ = self.attention(
-                    x_reshaped.transpose(0, 1),
-                    x_reshaped.transpose(0, 1),
-                    x_reshaped.transpose(0, 1)
-                )
-                x_att = x_att.transpose(0, 1).squeeze(1)
-                x = self.fc1(x_att)
-                x = self.relu1(x)
-                x = self.dropout1(x)
-                x = self.fc2(x)
-                x = self.relu2(x)
-                x = self.dropout2(x)
-                x_temporal = x.unsqueeze(1)
-                temporal_out, _ = self.temporal(x_temporal)
-                temporal_out = temporal_out.reshape(temporal_out.size(0), -1)
-                x = self.fc3(temporal_out)
-                x = self.relu3(x)
-                x = self.dropout3(x)
-                x = self.fc4(x)
-                x = self.relu4(x)
-                x = self.output(x)
-                return x
-                
-        logger.info("Successfully created model classes directly")
-        
-    except Exception as check_error:
-        logger.error(f"Error creating model classes: {str(check_error)}")
-    
-    logger.error("Could not import or create model classes. Will attempt to proceed with inline definitions.")
+    logger.error(f"Failed to import model classes: {e}")
+    logger.error("This is a critical error. Please check your installation and module structure.")
+    raise
 
 # Global cache for loaded models to avoid reloading the same model
 _model_cache = {}

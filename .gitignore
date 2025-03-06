@@ -25,6 +25,7 @@ venv/
 env/
 ENV/
 .venv/
+virtualenv/
 
 # IDE
 .idea/
@@ -35,9 +36,17 @@ ENV/
 # Project specific
 data/
 models/
+logs/
+runs/
+outputs/
 *.csv
 *.pth
+*.pt
+*.pkl
+*.onnx
 *.png
+*.jpg
+*.jpeg
 *.log
 
 # Jupyter Notebook
@@ -45,8 +54,19 @@ models/
 
 # OS specific
 .DS_Store
-Thumbs.db 
+Thumbs.db
 
-# SSH and deployment files
-eval*
-deploy_runpod.sh 
+# Secrets - never commit these!
+.env
+*.pem
+*.key
+secrets/
+
+# Deployment and infrastructure
+deploy_runpod.sh
+runpod_config.json
+
+# Local development files
+local_test.py
+*.local.py
+.dev/ 

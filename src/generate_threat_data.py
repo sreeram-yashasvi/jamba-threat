@@ -11,7 +11,7 @@ import logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def generate_threat_intel_feed(output_file="data/threat_intel_feed.csv", num_entries=1000):
+def generate_threat_intel_feed(output_file="data/threat_intel_feed.csv", num_entries=15000):
     """Generate a threat intelligence feed dataset with the specified number of entries.
     
     Args:

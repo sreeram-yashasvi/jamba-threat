@@ -44,6 +44,39 @@ or login via CLI:
 huggingface-cli login
 ```
 
+## API Key Security
+
+The project uses several external APIs, including RunPod for deployment. Follow these best practices for API key security:
+
+1. **Never commit API keys to the repository**
+2. Use environment variables to store sensitive credentials:
+
+```bash
+# For RunPod API
+export RUNPOD_API_KEY=your_runpod_api_key_here
+
+# For Hugging Face
+export HF_TOKEN=your_huggingface_token_here
+```
+
+3. For local development, consider using a `.env` file (which is listed in `.gitignore`):
+
+```bash
+# Create a .env file
+echo "RUNPOD_API_KEY=your_key_here" > .env
+echo "HF_TOKEN=your_token_here" >> .env
+
+# Use with python-dotenv
+# In your code:
+# from dotenv import load_dotenv
+# load_dotenv()
+```
+
+4. For production deployments, use your platform's secure secret management:
+   - Docker: use environment variables or Docker secrets
+   - RunPod: use the "Environment Variables" section in the RunPod console
+   - Cloud: use services like AWS Secrets Manager, GCP Secret Manager, etc.
+
 ## Deployment on RunPod.io
 
 RunPod.io provides a range of GPU options that are ideal for training large language models like Jamba.

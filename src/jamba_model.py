@@ -49,34 +49,17 @@ class JambaThreatModel(nn.Module):
         """
         super(JambaThreatModel, self).__init__()
         
-        # Make embed_dim divisible by num_heads
-        num_heads = 4
-        self.embed_dim = input_dim
+        # Simplify the attention head logic by using a fixed embedding dimension
+        self.orig_input_dim = input_dim
+        self.embed_dim = 128  # Fixed embedding dimension that is divisible by common head counts
+        self.num_heads = 4    # Fixed number of attention heads
         
-        # Find a suitable number of heads that divides embed_dim
-        found_valid_heads = False
-        possible_heads = [4, 2, 7, 1]  # Try these head counts in order
-        
-        for heads in possible_heads:
-            if input_dim % heads == 0:
-                num_heads = heads
-                found_valid_heads = True
-                logger.info(f"Using {num_heads} attention heads")
-                break
-        
-        # If no suitable head count found, pad the input dimension
-        if not found_valid_heads:
-            # Round up to multiple of 4
-            self.embed_dim = ((input_dim + 3) // 4) * 4
-            logger.info(f"Padding input dimension from {input_dim} to {self.embed_dim}")
-            # Add embedding layer to project to new dimension
-            self.embedding = nn.Linear(input_dim, self.embed_dim)
-        else:
-            # No embedding needed
-            self.embedding = nn.Identity()
+        # Always use an embedding layer to project to the fixed dimension
+        self.embedding = nn.Linear(input_dim, self.embed_dim)
+        logger.info(f"Using embedding layer: {input_dim} -> {self.embed_dim} with {self.num_heads} attention heads")
             
         # Multi-head self-attention layer
-        self.attention = nn.MultiheadAttention(embed_dim=self.embed_dim, num_heads=num_heads)
+        self.attention = nn.MultiheadAttention(embed_dim=self.embed_dim, num_heads=self.num_heads)
         
         # Feature extraction
         self.fc1 = nn.Linear(self.embed_dim, 256)

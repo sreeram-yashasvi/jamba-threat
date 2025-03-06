@@ -60,8 +60,7 @@ class JambaThreatModel(nn.Module):
             nn.Dropout(0.1),
             nn.Linear(64, 32),
             nn.SiLU(),
-            nn.Linear(32, 1),
-            nn.Sigmoid()
+            nn.Linear(32, 1)
         )
     
     def forward(self, x):
