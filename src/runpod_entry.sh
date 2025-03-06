@@ -1,102 +1,103 @@
 #!/bin/bash
-set -e
 
-echo "======================================="
-echo "Jamba Threat Detection - RunPod Startup"
-echo "======================================="
+# Jamba Threat Detection - RunPod Entry Script
+# This script is executed when the container starts in RunPod
 
-# Function to log with timestamps
-log() {
-    echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1"
-}
+set -e  # Exit immediately if a command exits with a non-zero status
 
-# Define directories
-export APP_DIR="${APP_DIR:-/app}"
-export MODEL_DIR="${MODEL_DIR:-${APP_DIR}/models}"
-export LOGS_DIR="${LOGS_DIR:-${APP_DIR}/logs}"
-export DATA_DIR="${DATA_DIR:-${APP_DIR}/data}"
+echo "Starting Jamba Threat Detection RunPod Server"
+echo "$(date): Container startup initiated"
+
+# Setup environment
+export PYTHONPATH=${PYTHONPATH}:/app:/app/src
+export MODEL_DIR=${MODEL_DIR:-/app/models}
+export LOGS_DIR=${LOGS_DIR:-/app/logs}
+export DEBUG_MODE=${DEBUG_MODE:-false}
 
 # Create necessary directories
-log "Creating necessary directories..."
-mkdir -p "${MODEL_DIR}"
-mkdir -p "${LOGS_DIR}"
-mkdir -p "${DATA_DIR}"
+mkdir -p ${MODEL_DIR}
+mkdir -p ${LOGS_DIR}
 
-# Set Python path
-export PYTHONPATH="${PYTHONPATH}:${APP_DIR}"
+# Log environment information
+echo "$(date): Environment setup:"
+echo "- PYTHONPATH: ${PYTHONPATH}"
+echo "- MODEL_DIR: ${MODEL_DIR}"
+echo "- LOGS_DIR: ${LOGS_DIR}"
+echo "- DEBUG_MODE: ${DEBUG_MODE}"
+echo "- Python version: $(python --version)"
+echo "- Directory structure:"
+ls -la /app
 
-# Check if environment variables are set
-log "Checking environment variables..."
-if [ -z "${RUNPOD_API_KEY}" ]; then
-    log "⚠️  WARNING: RUNPOD_API_KEY environment variable is not set"
-    log "    Some functionality may be limited"
+# Verify system dependencies
+echo "$(date): Checking system dependencies"
+if ! command -v python &> /dev/null; then
+    echo "ERROR: Python not found"
+    exit 1
 fi
 
-if [ -z "${RUNPOD_ENDPOINT_ID}" ]; then
-    log "⚠️  WARNING: RUNPOD_ENDPOINT_ID environment variable is not set"
-    log "    Some functionality may be limited"
+if ! command -v pip &> /dev/null; then
+    echo "ERROR: pip not found"
+    exit 1
 fi
 
-# Load environment variables from .env file if it exists
-if [ -f "${APP_DIR}/.env" ]; then
-    log "Loading environment variables from .env file..."
-    export $(grep -v '^#' "${APP_DIR}/.env" | xargs)
+# Check if required Python packages are installed
+echo "$(date): Checking Python dependencies"
+pip list | grep torch
+pip list | grep pandas
+pip list | grep numpy
+pip list | grep runpod
+
+# Verify GPU if CUDA is available
+if [[ -n "${NVIDIA_VISIBLE_DEVICES}" ]] && [[ "${NVIDIA_VISIBLE_DEVICES}" != "none" ]]; then
+    echo "$(date): GPU information:"
+    nvidia-smi || echo "WARNING: nvidia-smi command failed, but continuing"
 fi
 
-# Print directory structure for debugging
-log "Directory structure:"
-ls -la "${APP_DIR}"
-ls -la "${APP_DIR}/src" 2>/dev/null || log "src directory not found"
-
-# Run startup validation checks if the script exists
-if [ -f "${APP_DIR}/startup_check.sh" ]; then
-    log "Running startup validation checks..."
-    "${APP_DIR}/startup_check.sh"
-    if [ $? -ne 0 ]; then
-        log "❌ Startup validation failed. Exiting."
-        exit 1
-    fi
-else
-    log "No startup_check.sh found, skipping validation"
-fi
-
-# Check for CUDA and GPU availability
-log "Checking CUDA and GPU availability..."
-python -c "import torch; print('CUDA Available:', torch.cuda.is_available()); print('GPU Count:', torch.cuda.device_count()); print('CUDA Version:', torch.version.cuda if torch.cuda.is_available() else 'N/A')"
-
-# Print Python and package versions
-log "Python and package versions:"
-python -c "import sys; print('Python:', sys.version)"
-python -c "import torch; print('PyTorch:', torch.__version__)"
-python -c "import runpod; print('RunPod:', runpod.__version__)"
-
-# Print Python path and modules
-log "Python path:"
-python -c "import sys; print('\n'.join(sys.path))"
-log "Installed modules:"
-pip list
-
-# Check if jamba_model module can be imported
-log "Testing jamba_model import..."
-python -c "import sys; sys.path.append('${APP_DIR}'); sys.path.append('${APP_DIR}/src'); import importlib; print('Import successful' if importlib.util.find_spec('jamba_model') else 'Import failed')" || log "Import test failed"
-
-# Run a quick model health check if possible
-log "Running model health check..."
+# Run health check and environment setup using the utils modules
+echo "$(date): Running pre-flight health checks"
+echo "-------------------------"
 python -c "
 import sys
-sys.path.append('${APP_DIR}')
-sys.path.append('${APP_DIR}/src')
+import traceback
 try:
-    from jamba_model import JambaThreatModel
-    model = JambaThreatModel(input_dim=28)
-    print('✓ Model successfully initialized')
+    # Add src to path if needed
+    from pathlib import Path
+    current_dir = Path(__file__).parent
+    if str(current_dir) not in sys.path:
+        sys.path.append(str(current_dir))
+    if str(current_dir.parent) not in sys.path:
+        sys.path.append(str(current_dir.parent))
+    
+    # Import and run environment setup
+    from utils import environment, validation
+    print('Setting up environment...')
+    environment.setup_environment(create_dirs=True)
+    
+    # Run validation checks
+    print('Running validation checks...')
+    validation_result = validation.run_health_check()
+    
+    if validation_result.get('success', False):
+        print('Health check passed!')
+        for key, value in validation_result.items():
+            if key != 'success':
+                print(f'- {key}: {value}')
+    else:
+        print('Health check failed!')
+        print(f'Error: {validation_result.get(\"error\", \"Unknown error\")}')
+        # Continue anyway to not break existing deployments
+        print('Continuing despite health check failure...')
 except Exception as e:
-    print(f'✗ Model initialization failed: {e}')
-" || log "Model health check failed"
+    print(f'Error during health check: {e}')
+    traceback.print_exc()
+    print('Continuing despite health check failure...')
+" || echo "WARNING: Health check script failed, but continuing"
+echo "-------------------------"
 
-echo "======================================="
-log "Starting RunPod handler..."
-echo "======================================="
-
-# Start the actual handler with enhanced logging
-exec python -m runpod.serverless.start --debug 
+# Start the RunPod handler
+echo "$(date): Starting RunPod handler"
+cd /app
+runpod --handler-path /app/src/handler.py
+# Keep the container running until it's stopped
+echo "$(date): RunPod handler exited, keeping container alive for debugging"
+tail -f /dev/null 

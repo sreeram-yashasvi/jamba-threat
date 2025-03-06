@@ -1,329 +1,203 @@
 #!/usr/bin/env python3
+"""
+Verification tool for Jamba Threat Detection model deployment on RunPod.
+
+This script verifies:
+1. Model structure compatibility
+2. Model serialization consistency
+3. Environment variable configuration
+4. RunPod endpoint connectivity
+
+Usage:
+    python src/runpod_verify.py [options]
+
+Options:
+    --skip-endpoint-check    Skip RunPod endpoint check
+    --api-key KEY            RunPod API key (defaults to environment variable)
+    --endpoint-id ID         RunPod endpoint ID (defaults to environment variable)
+    --json                   Output results as JSON
+    --verbose, -v            Enable verbose logging
+"""
+
 import os
 import sys
-import logging
 import argparse
+import logging
 import json
-import torch
-import io
-import base64
-import requests
-import pandas as pd
-import numpy as np
-from pathlib import Path
+import time
 
-# Set up logging
+# Add the project root to the path to allow importing from src
+sys.path.insert(0, os.path.abspath(os.path.dirname(os.path.dirname(__file__))))
+
+try:
+    from src.utils import environment, validation
+except ImportError:
+    print("Error: Could not import utility modules.")
+    print("Make sure you're running this script from the project root directory.")
+    sys.exit(1)
+
+# Configure logging
 logging.basicConfig(
     level=logging.INFO,
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s'
 )
 logger = logging.getLogger(__name__)
 
-def verify_model_structure():
-    """Verify that model structures are consistent between local and RunPod environments."""
+def parse_args():
+    """Parse command-line arguments."""
+    parser = argparse.ArgumentParser(
+        description="Verify the Jamba Threat Detection model deployment on RunPod"
+    )
     
-    # Log versions
-    logger.info(f"PyTorch version: {torch.__version__}")
-    logger.info(f"CUDA available: {torch.cuda.is_available()}")
+    parser.add_argument(
+        "--skip-endpoint-check",
+        action="store_true",
+        help="Skip RunPod endpoint check"
+    )
     
-    try:
-        # Check if jamba_model module exists and can be imported locally
-        logger.info("Testing local imports:")
-        try:
-            # First try importing from jamba_model (container structure)
-            sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-            import jamba_model
-            from jamba_model import JambaThreatModel, ThreatDataset
-            logger.info("✓ Successfully imported from 'jamba_model'")
-            model_source = "jamba_model"
-        except ImportError as e:
-            logger.info(f"✗ Import from jamba_model failed: {e}")
-            
-            # Try importing directly from current directory
-            try:
-                from jamba_model import JambaThreatModel, ThreatDataset
-                logger.info("✓ Successfully imported from current directory")
-                model_source = "current_directory"
-            except ImportError as e:
-                logger.info(f"✗ Import from current directory failed: {e}")
-                
-                # Try importing from src directory
-                try:
-                    sys.path.append(os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__))), "src"))
-                    from jamba_model import JambaThreatModel, ThreatDataset
-                    logger.info("✓ Successfully imported from src directory")
-                    model_source = "src_directory"
-                except ImportError as e:
-                    logger.error(f"✗ All import attempts failed: {e}")
-                    return False
-        
-        # Test model initialization
-        try:
-            logger.info("Testing model initialization:")
-            model = JambaThreatModel(input_dim=28)
-            logger.info("✓ Model initialized successfully")
-            
-            # Check model structure
-            logger.info("Model structure overview:")
-            for name, param in model.named_parameters():
-                logger.info(f"  {name}: {param.shape}")
-            
-            # Verify the model's forward pass
-            sample_input = torch.randn(4, 28)
-            output = model(sample_input)
-            logger.info(f"✓ Forward pass successful. Output shape: {output.shape}")
-            
-            return True
-        except Exception as e:
-            logger.error(f"✗ Model initialization or forward pass failed: {e}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"Verification failed: {e}")
-        return False
+    parser.add_argument(
+        "--api-key",
+        help="RunPod API key (defaults to environment variable)"
+    )
+    
+    parser.add_argument(
+        "--endpoint-id",
+        help="RunPod endpoint ID (defaults to environment variable)"
+    )
+    
+    parser.add_argument(
+        "--json",
+        action="store_true",
+        help="Output results as JSON"
+    )
+    
+    parser.add_argument(
+        "--verbose", "-v",
+        action="store_true",
+        help="Enable verbose logging"
+    )
+    
+    return parser.parse_args()
 
-def verify_runpod_endpoint(api_key, endpoint_id):
-    """Verify that the RunPod endpoint is reachable and functioning."""
+def run_verification(args):
+    """
+    Run the verification process.
     
-    if not api_key or not endpoint_id:
-        logger.error("API key and endpoint ID are required")
-        return False
-    
-    logger.info(f"Verifying RunPod endpoint {endpoint_id}")
-    
-    # Check if endpoint exists
-    try:
-        headers = {
-            "Authorization": f"Bearer {api_key}"
-        }
-        response = requests.get(
-            f"https://api.runpod.io/v2/{endpoint_id}/health",
-            headers=headers
-        )
+    Args:
+        args: Parsed command-line arguments
         
-        if response.status_code == 200:
-            logger.info("✓ Endpoint exists and is reachable")
-        else:
-            logger.error(f"✗ Endpoint health check failed: {response.status_code} - {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"✗ Error connecting to RunPod API: {e}")
-        return False
-    
-    # Submit a health check job
-    try:
-        headers = {
-            "Authorization": f"Bearer {api_key}",
-            "Content-Type": "application/json"
-        }
-        data = {
-            "input": {
-                "operation": "health"
-            }
-        }
-        response = requests.post(
-            f"https://api.runpod.io/v2/{endpoint_id}/run",
-            headers=headers,
-            json=data
-        )
-        
-        if response.status_code == 200:
-            job_status = response.json()
-            job_id = job_status.get("id")
-            logger.info(f"✓ Health check job submitted: {job_id}")
-            
-            # Poll for job completion
-            max_polls = 12
-            poll_count = 0
-            while poll_count < max_polls:
-                poll_count += 1
-                
-                status_response = requests.get(
-                    f"https://api.runpod.io/v2/{endpoint_id}/status/{job_id}",
-                    headers=headers
-                )
-                
-                if status_response.status_code == 200:
-                    status_data = status_response.json()
-                    status = status_data.get("status")
-                    
-                    if status == "COMPLETED":
-                        logger.info(f"✓ Health check job completed")
-                        
-                        # Parse job output
-                        output = status_data.get("output")
-                        if output:
-                            logger.info("Health check results:")
-                            if "system_info" in output:
-                                system_info = output["system_info"]
-                                logger.info(f"  Device: {system_info.get('device', 'unknown')}")
-                                logger.info(f"  CUDA available: {system_info.get('cuda_available', 'unknown')}")
-                                logger.info(f"  CUDA version: {system_info.get('cuda_version', 'unknown')}")
-                                logger.info(f"  Python version: {system_info.get('python_version', 'unknown')}")
-                                logger.info(f"  Model init success: {system_info.get('model_init_success', 'unknown')}")
-                                
-                                # Check for potential issues
-                                env = system_info.get("environment", {})
-                                if not env.get("model_directory_exists", True):
-                                    logger.error("✗ Model directory does not exist in container")
-                                    return False
-                                
-                                if not system_info.get("model_init_success", False):
-                                    logger.error(f"✗ Model initialization failed: {system_info.get('model_init_error', 'Unknown error')}")
-                                    return False
-                            
-                            return True
-                        else:
-                            logger.error("✗ No output from health check job")
-                            return False
-                    elif status == "FAILED":
-                        logger.error(f"✗ Health check job failed: {status_data.get('error', 'Unknown error')}")
-                        return False
-                    else:
-                        logger.info(f"Health check job status: {status}")
-                        import time
-                        time.sleep(5)
-                else:
-                    logger.error(f"✗ Error checking job status: {status_response.status_code} - {status_response.text}")
-                    return False
-            
-            logger.error("✗ Timed out waiting for health check job completion")
-            return False
-        else:
-            logger.error(f"✗ Error submitting health check job: {response.status_code} - {response.text}")
-            return False
-    except Exception as e:
-        logger.error(f"✗ Error during health check: {e}")
-        return False
-
-def test_model_serialization():
-    """Test model serialization to ensure compatibility between local and RunPod environments."""
-    
-    try:
-        # Import model class
-        from jamba_model import JambaThreatModel
-        
-        # Set deterministic mode for reproducibility
-        torch.manual_seed(42)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(42)
-        
-        # Create test model
-        model = JambaThreatModel(input_dim=28)
-        model.eval()  # Set to evaluation mode for reproducible results
-        
-        # Serialize model
-        buffer = io.BytesIO()
-        torch.save(model.state_dict(), buffer)
-        buffer.seek(0)
-        
-        # Set new seed to ensure we're testing proper serialization
-        torch.manual_seed(100)
-        if torch.cuda.is_available():
-            torch.cuda.manual_seed_all(100)
-        
-        # Load model back to verify
-        state_dict = torch.load(buffer)
-        
-        # Create a new model and load state
-        new_model = JambaThreatModel(input_dim=28)
-        new_model.load_state_dict(state_dict)
-        new_model.eval()  # Set to evaluation mode
-        
-        # Create fixed test input
-        torch.manual_seed(42)
-        sample_input = torch.randn(4, 28)
-        
-        # Test forward pass with no gradients
-        with torch.no_grad():
-            output1 = model(sample_input)
-            output2 = new_model(sample_input)
-        
-        # Compare outputs
-        match = torch.allclose(output1, output2, rtol=1e-5, atol=1e-5)
-        if match:
-            logger.info("✓ Model serialization and loading successful")
-            return True
-        else:
-            logger.error(f"✗ Model outputs don't match after serialization: max diff = {(output1 - output2).abs().max().item()}")
-            return False
-            
-    except Exception as e:
-        logger.error(f"✗ Error testing model serialization: {e}")
-        return False
-
-def check_environment_variables():
-    """Check for required environment variables."""
-    
-    missing_vars = []
-    
-    # Check for RunPod variables
-    runpod_api_key = os.environ.get("RUNPOD_API_KEY")
-    if not runpod_api_key:
-        missing_vars.append("RUNPOD_API_KEY")
-    
-    runpod_endpoint_id = os.environ.get("RUNPOD_ENDPOINT_ID")
-    if not runpod_endpoint_id:
-        missing_vars.append("RUNPOD_ENDPOINT_ID")
-    
-    if missing_vars:
-        logger.warning(f"Missing environment variables: {', '.join(missing_vars)}")
-        return False
-    else:
-        logger.info("✓ All required environment variables are set")
-        return True
-
-def main():
-    parser = argparse.ArgumentParser(description='Verify RunPod deployment')
-    parser.add_argument('--api-key', help='RunPod API key (or set RUNPOD_API_KEY env var)')
-    parser.add_argument('--endpoint-id', help='RunPod endpoint ID (or set RUNPOD_ENDPOINT_ID env var)')
-    parser.add_argument('--skip-model-check', action='store_true', help='Skip model structure check')
-    parser.add_argument('--skip-endpoint-check', action='store_true', help='Skip endpoint check')
-    parser.add_argument('--skip-serialization-check', action='store_true', help='Skip model serialization check')
-    
-    args = parser.parse_args()
-    
-    # Get API key and endpoint ID
-    api_key = args.api_key or os.environ.get('RUNPOD_API_KEY')
-    endpoint_id = args.endpoint_id or os.environ.get('RUNPOD_ENDPOINT_ID')
-    
-    # Run verification checks
+    Returns:
+        dict: Verification results
+    """
     logger.info("=== RunPod Deployment Verification ===")
     
+    # Initialize environment
+    environment.initialize_environment()
+    
     # Check environment variables
-    env_check = check_environment_variables()
+    env_result = validation.check_environment_variables()
+    if not env_result["all_vars_set"]:
+        logger.warning(f"Missing environment variables: {', '.join(env_result['missing_vars'])}")
     
     # Check model structure
-    model_check = True
-    if not args.skip_model_check:
-        logger.info("\n=== Model Structure Verification ===")
-        model_check = verify_model_structure()
+    logger.info("\n=== Model Structure Verification ===")
+    model_imports = validation.check_model_imports()
+    if not model_imports["model_class_available"]:
+        logger.error("Model structure verification failed: Could not import model classes")
+        model_init = {"initialization_successful": False, "error": "Model import failed"}
+    else:
+        model_init = validation.test_model_initialization()
     
     # Check model serialization
-    serialization_check = True
-    if not args.skip_serialization_check:
-        logger.info("\n=== Model Serialization Verification ===")
-        serialization_check = test_model_serialization()
+    logger.info("\n=== Model Serialization Verification ===")
+    if not model_imports["model_class_available"]:
+        logger.error("Model serialization verification skipped: Could not import model classes")
+        model_serial = {"serialization_successful": False, "error": "Model import failed"}
+    elif not model_init["initialization_successful"]:
+        logger.error("Model serialization verification skipped: Model initialization failed")
+        model_serial = {"serialization_successful": False, "error": "Model initialization failed"}
+    else:
+        model_serial = validation.test_model_serialization()
     
-    # Check RunPod endpoint
-    endpoint_check = True
-    if not args.skip_endpoint_check and api_key and endpoint_id:
+    # Check RunPod endpoint if not skipped
+    runpod_result = None
+    if not args.skip_endpoint_check:
         logger.info("\n=== RunPod Endpoint Verification ===")
-        endpoint_check = verify_runpod_endpoint(api_key, endpoint_id)
+        api_key = args.api_key or environment.get_runpod_api_key()
+        endpoint_id = args.endpoint_id or environment.get_runpod_endpoint_id()
+        
+        if not api_key or not endpoint_id:
+            logger.error("RunPod endpoint verification skipped: API key or endpoint ID missing")
+            runpod_result = {"endpoint_reachable": False, "error": "API key or endpoint ID missing"}
+        else:
+            runpod_result = validation.check_runpod_endpoint(api_key, endpoint_id)
+    else:
+        logger.info("\n=== RunPod Endpoint Verification Skipped ===")
+        runpod_result = {"endpoint_reachable": True, "health_check_successful": True, "skipped": True}
     
-    # Summary
+    # Compile results
+    results = {
+        "timestamp": time.time(),
+        "environment_variables": {
+            "status": "passed" if env_result["all_vars_set"] else "failed",
+            "details": env_result
+        },
+        "model_structure": {
+            "status": "passed" if model_init["initialization_successful"] and model_init["forward_pass_successful"] else "failed",
+            "details": {
+                "imports": model_imports,
+                "initialization": model_init
+            }
+        },
+        "model_serialization": {
+            "status": "passed" if model_serial["serialization_successful"] and model_serial.get("outputs_match", False) else "failed",
+            "details": model_serial
+        },
+        "runpod_endpoint": {
+            "status": "passed" if runpod_result["endpoint_reachable"] and runpod_result.get("health_check_successful", False) else ("skipped" if args.skip_endpoint_check else "failed"),
+            "details": runpod_result
+        }
+    }
+    
+    # Log summary
     logger.info("\n=== Verification Summary ===")
-    logger.info(f"Environment Variables: {'✓' if env_check else '✗'}")
-    logger.info(f"Model Structure: {'✓' if model_check else '✗'}")
-    logger.info(f"Model Serialization: {'✓' if serialization_check else '✗'}")
-    logger.info(f"RunPod Endpoint: {'✓' if endpoint_check else '✗'}")
+    logger.info(f"Environment Variables: {'✓' if results['environment_variables']['status'] == 'passed' else '✗'}")
+    logger.info(f"Model Structure: {'✓' if results['model_structure']['status'] == 'passed' else '✗'}")
+    logger.info(f"Model Serialization: {'✓' if results['model_serialization']['status'] == 'passed' else '✗'}")
+    logger.info(f"RunPod Endpoint: {'✓' if results['runpod_endpoint']['status'] == 'passed' else ('✓' if args.skip_endpoint_check else '✗')}")
     
-    if env_check and model_check and serialization_check and endpoint_check:
-        logger.info("\n✅ All checks passed! The RunPod deployment is correctly configured.")
-        return 0
+    # Determine overall status
+    all_passed = (
+        results["environment_variables"]["status"] == "passed" and
+        results["model_structure"]["status"] == "passed" and
+        results["model_serialization"]["status"] == "passed" and
+        (results["runpod_endpoint"]["status"] == "passed" or results["runpod_endpoint"]["status"] == "skipped")
+    )
+    
+    if all_passed:
+        logger.info("\n✅ All verification checks passed.")
     else:
         logger.error("\n❌ Some verification checks failed. Please review the logs above.")
-        return 1
+    
+    return results, all_passed
+
+def main():
+    """Main entry point."""
+    args = parse_args()
+    
+    # Set log level based on verbosity
+    if args.verbose:
+        logging.getLogger().setLevel(logging.DEBUG)
+    
+    # Run the verification
+    results, all_passed = run_verification(args)
+    
+    # Output JSON if requested
+    if args.json:
+        print(json.dumps(results, indent=2))
+    
+    # Return 0 if all checks passed, 1 otherwise
+    return 0 if all_passed else 1
 
 if __name__ == "__main__":
     sys.exit(main()) 
