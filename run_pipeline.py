@@ -13,7 +13,7 @@ logger = logging.getLogger(__name__)
 
 def main():
     parser = argparse.ArgumentParser(description='Run the Jamba Threat Intelligence Pipeline')
-    parser.add_argument('--entries', type=int, default=1000, 
+    parser.add_argument('--entries', type=int, default=15000, 
                         help='Number of threat intel entries to generate')
     parser.add_argument('--epochs', type=int, default=30, 
                         help='Number of training epochs')
@@ -23,8 +23,29 @@ def main():
                         help='Skip training phase')
     parser.add_argument('--no-predict', action='store_true', 
                         help='Skip prediction phase')
+    parser.add_argument('--runpod', action='store_true',
+                        help='Use RunPod for training (GPU accelerated)')
+    parser.add_argument('--api-key', 
+                        help='RunPod API key (required with --runpod, or set RUNPOD_API_KEY env var)')
+    parser.add_argument('--endpoint-id', 
+                        help='RunPod endpoint ID (required with --runpod, or set RUNPOD_ENDPOINT_ID env var)')
+    parser.add_argument('--batch-size', type=int, default=128,
+                        help='Batch size for training (larger for GPU training)')
     
     args = parser.parse_args()
+    
+    # Validate RunPod arguments if using RunPod
+    if args.runpod:
+        api_key = args.api_key or os.environ.get('RUNPOD_API_KEY')
+        endpoint_id = args.endpoint_id or os.environ.get('RUNPOD_ENDPOINT_ID')
+        
+        if not api_key:
+            logger.error("RunPod API key must be provided via --api-key or RUNPOD_API_KEY environment variable")
+            return 1
+        
+        if not endpoint_id:
+            logger.error("RunPod endpoint ID must be provided via --endpoint-id or RUNPOD_ENDPOINT_ID environment variable")
+            return 1
     
     # Create timestamp for this run
     timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
@@ -44,10 +65,27 @@ def main():
     if not args.no_train:
         # Step 2: Train the model
         logger.info("\n=== STEP 2: TRAINING JAMBA THREAT MODEL ===")
-        train_cmd = (f"python src/train_with_intel.py "
-                    f"--epochs {args.epochs} "
-                    f"--entries {args.entries} "
-                    f"{'' if args.regenerate else '--use-existing'}")
+        
+        if args.runpod:
+            # Train on RunPod with GPU
+            logger.info("Using RunPod with GPU acceleration for training")
+            api_key = args.api_key or os.environ.get('RUNPOD_API_KEY')
+            endpoint_id = args.endpoint_id or os.environ.get('RUNPOD_ENDPOINT_ID')
+            
+            train_cmd = (f"python src/train_with_runpod.py "
+                        f"--data data/processed_threat_data.csv "
+                        f"--target is_threat "
+                        f"--epochs {args.epochs} "
+                        f"--batch-size {args.batch_size} "
+                        f"--lr 0.001 "
+                        f"--api-key {api_key} "
+                        f"--endpoint-id {endpoint_id}")
+        else:
+            # Train locally
+            train_cmd = (f"python src/train_with_intel.py "
+                        f"--epochs {args.epochs} "
+                        f"--entries {args.entries} "
+                        f"{'' if args.regenerate else '--use-existing'}")
         
         logger.info(f"Running: {train_cmd}")
         start_time = time.time()
