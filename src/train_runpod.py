@@ -189,122 +189,92 @@ class RunPodTrainer:
         
         return temp_file_path, "csv"
     
-    def submit_training_job(self, data: pd.DataFrame, params: Dict[str, Any]) -> Dict[str, Any]:
-        """Submit a training job to RunPod.
+    def submit_training_job(self, data, params):
+        """Submit a training job to RunPod with proper chunking support."""
         
-        For large datasets, this method uses a more efficient approach:
-        1. For small datasets: Send data directly in the request
-        2. For large datasets: Split into chunks or use temporary file reference
-        
-        Args:
-            data: DataFrame with training data
-            params: Dictionary of training parameters
-            
-        Returns:
-            Dictionary with job submission result
-        """
-        # Add data statistics to parameters
-        data_stats = self.get_data_stats(data)
-        params["data_stats"] = data_stats
-        
-        # Estimate payload size with all data
+        # Calculate total payload size
         data_records = data.to_dict(orient='records')
-        full_payload = {
-            "input": {
-                "operation": "train",
-                "data": data_records,
-                "params": params
-            }
-        }
-        payload_size = len(json.dumps(full_payload).encode('utf-8'))
-        logger.info(f"Full payload size would be: {payload_size/1024:.2f} KB")
+        full_payload_size = len(json.dumps({"input": {"data": data_records}}).encode('utf-8'))
         
-        # Check if payload exceeds size limit
-        if payload_size < MAX_PAYLOAD_SIZE:
-            # Small enough to send directly
-            logger.info(f"Submitting training job with {len(data_records)} records in a single request")
-            payload = full_payload
-            
-            # Submit the job
-            response = requests.post(f"{self.base_url}/run", headers=self.headers, json=payload)
-            
-            if response.status_code == 200:
-                result = response.json()
-                logger.info(f"Job submitted successfully. Job ID: {result.get('id')}")
-                return result
+        # If data fits within limit, send directly
+        if full_payload_size < MAX_PAYLOAD_SIZE:
+            return self._submit_single_job(data_records, params)
+        
+        # Use true chunking for large datasets
+        logger.info(f"Dataset too large ({full_payload_size/1024:.2f} KB), splitting into chunks")
+        
+        # Determine optimal chunk size through binary search
+        def can_fit(num_records):
+            sample = data_records[:num_records]
+            size = len(json.dumps({"input": {"data": sample}}).encode('utf-8'))
+            return size < MAX_PAYLOAD_SIZE * 0.9  # 90% of limit for safety
+        
+        # Binary search for largest chunk size that fits
+        low, high = 1, len(data_records)
+        optimal_chunk_size = 1
+        while low <= high:
+            mid = (low + high) // 2
+            if can_fit(mid):
+                optimal_chunk_size = mid
+                low = mid + 1
             else:
-                logger.error(f"Failed to submit job. Status code: {response.status_code}")
-                logger.error(f"Response: {response.text}")
-                raise RuntimeError(f"Failed to submit job: {response.text}")
-        else:
-            # Too large to send directly
-            logger.info("Dataset too large for a single request")
+                high = mid - 1
             
-            # Method 1: Use a representative sample for initial training
-            sample_size = min(1000, len(data))
-            stratify_col = None
+        logger.info(f"Optimal chunk size: {optimal_chunk_size} records")
+        
+        # Split data into chunks
+        chunks = [data_records[i:i+optimal_chunk_size] for i in range(0, len(data_records), optimal_chunk_size)]
+        logger.info(f"Split dataset into {len(chunks)} chunks")
+        
+        # Create multi-stage training job
+        # 1. Submit first chunk with initialization flag
+        first_params = params.copy()
+        first_params["is_chunk"] = True
+        first_params["chunk_number"] = 1
+        first_params["total_chunks"] = len(chunks)
+        first_params["initialize_model"] = True
+        
+        job_result = self._submit_single_job(chunks[0], first_params)
+        job_id = job_result.get("id")
+        
+        # Wait for first chunk to complete
+        result = self.wait_for_completion(job_id)
+        
+        # Ensure temp model was saved
+        if not result.get("success") or "temp_model_path" not in result:
+            raise RuntimeError("Failed to initialize model with first chunk")
+        
+        # 2. Submit remaining chunks sequentially, using previous model
+        temp_model_path = result["temp_model_path"]
+        
+        for i, chunk in enumerate(chunks[1:], 2):
+            chunk_params = params.copy()
+            chunk_params["is_chunk"] = True
+            chunk_params["chunk_number"] = i
+            chunk_params["total_chunks"] = len(chunks)
+            chunk_params["temp_model_path"] = temp_model_path
             
-            # Try to use stratified sampling if we have a target column
-            target_columns = [col for col in data.columns if col.lower() in ['is_threat', 'target', 'label']]
-            if target_columns:
-                stratify_col = target_columns[0]
-                logger.info(f"Using stratified sampling on column: {stratify_col}")
-                
-                # Get class distribution for balanced sampling
-                class_counts = data[stratify_col].value_counts()
-                minority_class_count = class_counts.min()
-                
-                # Take equal samples from each class
-                samples = []
-                for class_val in class_counts.index:
-                    class_data = data[data[stratify_col] == class_val]
-                    class_sample = class_data.sample(min(minority_class_count, sample_size // len(class_counts)))
-                    samples.append(class_sample)
-                
-                sampled_data = pd.concat(samples).sample(frac=1).reset_index(drop=True)
-            else:
-                # Random sampling if no target column
-                sampled_data = data.sample(sample_size).reset_index(drop=True)
+            job_result = self._submit_single_job(chunk, chunk_params)
+            job_id = job_result.get("id")
             
-            # Add flag to indicate this is a sample
-            params["is_sample"] = True
-            params["sample_size"] = len(sampled_data)
-            params["original_size"] = len(data)
+            # Wait for chunk to complete
+            result = self.wait_for_completion(job_id)
             
-            # Convert sample to records
-            sample_records = sampled_data.to_dict(orient='records')
+            # Update temp model path for next chunk
+            if not result.get("success"):
+                raise RuntimeError(f"Failed to process chunk {i}")
             
-            # Create payload with sample
-            sample_payload = {
-                "input": {
-                    "operation": "train",
-                    "data": sample_records,
-                    "params": params
-                }
-            }
-            
-            sample_size = len(json.dumps(sample_payload).encode('utf-8'))
-            logger.info(f"Sample payload size: {sample_size/1024:.2f} KB")
-            
-            # Check if sample fits
-            if sample_size < MAX_PAYLOAD_SIZE:
-                logger.info(f"Submitting training job with sampled data: {len(sampled_data)} records")
-                response = requests.post(f"{self.base_url}/run", headers=self.headers, json=sample_payload)
-                
-                if response.status_code == 200:
-                    result = response.json()
-                    logger.info(f"Job submitted successfully. Job ID: {result.get('id')}")
-                    return result
-                else:
-                    logger.error(f"Failed to submit job. Status code: {response.status_code}")
-                    logger.error(f"Response: {response.text}")
-                    raise RuntimeError(f"Failed to submit job: {response.text}")
-            else:
-                logger.error("Even sampled data is too large for request")
-                raise ValueError(
-                    "Dataset is too large to send via API. Consider using a smaller dataset "
-                    "or implementing a file-based approach."
-                )
+            temp_model_path = result.get("temp_model_path", temp_model_path)
+        
+        # 3. Submit final job to retrieve complete model
+        final_params = params.copy()
+        final_params["is_final"] = True
+        final_params["temp_model_path"] = temp_model_path
+        
+        final_job = self._submit_single_job([], final_params)
+        final_result = self.wait_for_completion(final_job.get("id"))
+        
+        return final_result
     
     def check_job_status(self, job_id: str) -> Dict[str, Any]:
         """Check the status of a training job.
@@ -376,42 +346,48 @@ class RunPodTrainer:
             logger.error(f"Response: {response.text}")
             raise RuntimeError(f"Failed to get job output: {response.text}")
     
-    def save_model(self, result: Dict[str, Any], output_path: str) -> None:
-        """Save the trained model from the job result.
-        
-        Args:
-            result: Job result from get_job_output
-            output_path: Path to save the model
-        """
+    def save_model(self, result, output_path):
+        """Save model with support for direct download from storage."""
         if not result.get("success", False):
             logger.error(f"Training was not successful: {result.get('error')}")
-            raise RuntimeError(f"Training was not successful: {result.get('error')}")
+            raise RuntimeError(f"Training failed: {result.get('error')}")
         
-        # Extract model data from result
-        model_data = result.get("model")
-        if not model_data:
-            logger.error("No model data found in job result")
-            raise ValueError("No model data found in job result")
+        # Check if result contains model data directly
+        if "model" in result:
+            # Small models returned directly
+            model_data = result["model"]
+            model_bytes = base64.b64decode(model_data)
+            
+            # Save model to output path
+            with open(output_path, "wb") as f:
+                f.write(model_bytes)
+            logger.info(f"Model saved to {output_path}")
+            
+        # Check if result contains a storage URL instead
+        elif "model_storage_url" in result:
+            # Large models stored in external storage
+            storage_url = result["model_storage_url"]
+            logger.info(f"Downloading model from storage: {storage_url}")
+            
+            # Download model from storage URL
+            response = requests.get(storage_url)
+            if response.status_code != 200:
+                raise RuntimeError(f"Failed to download model: {response.status_code}")
+            
+            # Save downloaded model
+            with open(output_path, "wb") as f:
+                f.write(response.content)
+            logger.info(f"Model downloaded and saved to {output_path}")
+            
+        else:
+            raise ValueError("No model data or storage URL found in result")
         
-        # Decode the base64-encoded model
-        model_bytes = base64.b64decode(model_data)
-        
-        # Create output directory if it doesn't exist
-        os.makedirs(os.path.dirname(os.path.abspath(output_path)), exist_ok=True)
-        
-        # Save the model
-        with open(output_path, "wb") as f:
-            f.write(model_bytes)
-        
-        logger.info(f"Model saved to {output_path}")
-        
-        # Save metrics
-        metrics = result.get("metrics", {})
-        metrics_path = f"{os.path.splitext(output_path)[0]}_metrics.json"
-        with open(metrics_path, "w") as f:
-            json.dump(metrics, f, indent=2)
-        
-        logger.info(f"Training metrics saved to {metrics_path}")
+        # Save metrics if available
+        if "metrics" in result:
+            metrics_path = f"{os.path.splitext(output_path)[0]}_metrics.json"
+            with open(metrics_path, "w") as f:
+                json.dump(result["metrics"], f, indent=2)
+            logger.info(f"Training metrics saved to {metrics_path}")
 
 def parse_args():
     """Parse command line arguments."""

@@ -147,28 +147,62 @@ def load_model(model_path: str, force_cpu: bool = False):
         raise
 
 def train_model(df, params):
-    """
-    Train the Jamba threat detection model.
-    
-    Args:
-        df: DataFrame of training data
-        params: Dictionary of training parameters
-        
-    Returns:
-        Dictionary with trained model and training metrics
-    """
+    """Train the model with support for chunked training and external storage."""
     try:
+        # Check if this is a continuation of chunked training
+        is_chunk = params.get('is_chunk', False)
+        is_final = params.get('is_final', False)
+        
+        if is_final:
+            # Final job just needs to retrieve and return the model
+            temp_model_path = params.get('temp_model_path')
+            if not temp_model_path or not os.path.exists(temp_model_path):
+                raise ValueError("Final job requires valid temp_model_path")
+            
+            # Load the model from temp storage
+            model = load_model_from_temp(temp_model_path)
+            
+            # For large models, store in external storage instead of returning directly
+            model_size = os.path.getsize(temp_model_path)
+            if model_size > MAX_RETURN_SIZE:
+                # Store in external storage and return URL
+                storage_url = store_model_in_external_storage(temp_model_path)
+                return {
+                    "success": True,
+                    "model_storage_url": storage_url,
+                    "metrics": load_metrics_from_temp(temp_model_path)
+                }
+            else:
+                # Small enough to return directly
+                buffer = BytesIO()
+                torch.save(model.state_dict(), buffer)
+                model_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
+                return {
+                    "success": True,
+                    "model": model_data,
+                    "metrics": load_metrics_from_temp(temp_model_path)
+                }
+        
+        # Regular training or chunk processing
         logging.info("Starting model training")
+        
+        # Use provided temp model if continuation of chunked training
+        if is_chunk and params.get('chunk_number', 1) > 1:
+            temp_model_path = params.get('temp_model_path')
+            model = load_model_from_temp(temp_model_path)
+            logging.info(f"Continuing training from chunk {params.get('chunk_number')}/{params.get('total_chunks')}")
+        else:
+            # Initialize new model
+            device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
+            input_dim = len(feature_list)
+            model = JambaThreatModel(input_dim).to(device)
+            logging.info(f"Initialized new model with input dimension: {input_dim}")
         
         # Extract parameters
         target_column = params.get('target_column', 'is_threat')
         epochs = params.get('epochs', 30)
         learning_rate = params.get('learning_rate', 0.001)
         batch_size = params.get('batch_size', 128)
-        
-        # Check for GPU availability
-        device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
-        logging.info(f"Using device: {device}")
         
         # Get feature list
         try:
@@ -210,11 +244,6 @@ def train_model(df, params):
             batch_size=batch_size
         )
         
-        # Initialize model
-        input_dim = len(feature_list)
-        logging.info(f"Initializing model with input dimension: {input_dim}")
-        model = JambaThreatModel(input_dim).to(device)
-        
         # Define loss function and optimizer
         criterion = nn.BCEWithLogitsLoss()
         optimizer = torch.optim.Adam(model.parameters(), lr=learning_rate)
@@ -228,67 +257,143 @@ def train_model(df, params):
         training_history = {
             'train_loss': [],
             'val_loss': [],
-            'val_accuracy': []
+            'val_accuracy': [],
+            'gpu_memory': []
         }
         
         start_time = time.time()
         
         for epoch in range(epochs):
-            # Training phase
-            model.train()
-            running_loss = 0.0
-            for batch_X, batch_y in train_loader:
-                batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
+            try:
+                # Record GPU memory usage
+                if torch.cuda.is_available():
+                    memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # GB
+                    memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)    # GB
+                    training_history['gpu_memory'].append({
+                        'allocated': memory_allocated,
+                        'reserved': memory_reserved
+                    })
+                    logging.info(f"GPU Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
                 
-                optimizer.zero_grad()
+                # Training phase with error recovery
+                model.train()
+                running_loss = 0.0
+                failed_batches = 0
                 
-                if use_amp:
-                    with torch.cuda.amp.autocast():
+                for batch_idx, (batch_X, batch_y) in enumerate(train_loader):
+                    try:
+                        batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
+                        
+                        optimizer.zero_grad()
+                        
+                        if use_amp:
+                            with torch.cuda.amp.autocast():
+                                outputs = model(batch_X)
+                                loss = criterion(outputs, batch_y)
+                            
+                            scaler.scale(loss).backward()
+                            scaler.step(optimizer)
+                            scaler.update()
+                        else:
+                            outputs = model(batch_X)
+                            loss = criterion(outputs, batch_y)
+                            loss.backward()
+                            optimizer.step()
+                        
+                        running_loss += loss.item()
+                        
+                    except RuntimeError as e:
+                        # Handle batch-specific errors
+                        failed_batches += 1
+                        if "out of memory" in str(e).lower():
+                            logging.warning(f"OOM error in batch {batch_idx}, skipping")
+                            torch.cuda.empty_cache()
+                            # If too many OOM errors, reduce batch size for next epoch
+                            if failed_batches > len(train_loader) // 4:
+                                raise RuntimeError("Too many OOM errors, consider reducing batch size")
+                        else:
+                            raise  # Re-raise other runtime errors
+                
+                epoch_train_loss = running_loss / len(train_loader)
+                training_history['train_loss'].append(epoch_train_loss)
+                
+                # Validation phase
+                model.eval()
+                val_loss = 0.0
+                correct = 0
+                total = 0
+                
+                with torch.no_grad():
+                    for batch_X, batch_y in test_loader:
+                        batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
                         outputs = model(batch_X)
                         loss = criterion(outputs, batch_y)
-                    
-                    scaler.scale(loss).backward()
-                    scaler.step(optimizer)
-                    scaler.update()
-                else:
-                    outputs = model(batch_X)
-                    loss = criterion(outputs, batch_y)
-                    loss.backward()
-                    optimizer.step()
+                        val_loss += loss.item()
+                        
+                        predicted = (torch.sigmoid(outputs) > 0.5).float()
+                        total += batch_y.size(0)
+                        correct += (predicted == batch_y).sum().item()
                 
-                running_loss += loss.item()
+                epoch_val_loss = val_loss / len(test_loader)
+                epoch_val_accuracy = correct / total
+                
+                training_history['val_loss'].append(epoch_val_loss)
+                training_history['val_accuracy'].append(epoch_val_accuracy)
+                
+                logging.info(f"Epoch {epoch+1}/{epochs}, Train Loss: {epoch_train_loss:.4f}, "
+                          f"Val Loss: {epoch_val_loss:.4f}, Val Accuracy: {epoch_val_accuracy:.4f}")
             
-            epoch_train_loss = running_loss / len(train_loader)
-            training_history['train_loss'].append(epoch_train_loss)
-            
-            # Validation phase
-            model.eval()
-            val_loss = 0.0
-            correct = 0
-            total = 0
-            
-            with torch.no_grad():
-                for batch_X, batch_y in test_loader:
-                    batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
-                    outputs = model(batch_X)
-                    loss = criterion(outputs, batch_y)
-                    val_loss += loss.item()
-                    
-                    predicted = (torch.sigmoid(outputs) > 0.5).float()
-                    total += batch_y.size(0)
-                    correct += (predicted == batch_y).sum().item()
-            
-            epoch_val_loss = val_loss / len(test_loader)
-            epoch_val_accuracy = correct / total
-            
-            training_history['val_loss'].append(epoch_val_loss)
-            training_history['val_accuracy'].append(epoch_val_accuracy)
-            
-            logging.info(f"Epoch {epoch+1}/{epochs}, Train Loss: {epoch_train_loss:.4f}, "
-                      f"Val Loss: {epoch_val_loss:.4f}, Val Accuracy: {epoch_val_accuracy:.4f}")
+            except Exception as e:
+                logging.error(f"Error in epoch {epoch+1}: {str(e)}")
+                logging.error(traceback.format_exc())
+                
+                # Attempt recovery
+                torch.cuda.empty_cache()
+                
+                # Save checkpoint to avoid losing progress
+                checkpoint_path = f"/tmp/training_checkpoint_epoch_{epoch}.pt"
+                torch.save({
+                    'epoch': epoch,
+                    'model_state_dict': model.state_dict(),
+                    'optimizer_state_dict': optimizer.state_dict(),
+                    'training_history': training_history
+                }, checkpoint_path)
+                logging.info(f"Saved checkpoint to {checkpoint_path}")
+                
+                # Continue to next epoch instead of failing completely
+                continue
         
         training_time = time.time() - start_time
         logging.info(f"Training completed in {training_time:.2f} seconds")
+        
+        # Final evaluation
+        model.eval()
+        with torch.no_grad():
+            final_accuracy = 0.0
+            for batch_X, batch_y in test_loader:
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
+                outputs = model(batch_X)
+                predicted = (torch.sigmoid(outputs) > 0.5).float()
+                final_accuracy += (predicted == batch_y).sum().item() / batch_y.size(0)
+            
+            final_accuracy /= len(test_loader)
+        
+        # Save model to temporary location if chunked training
+        if is_chunk:
+            temp_path = f"/tmp/model_chunk_{params.get('chunk_number')}.pt"
+            torch.save(model.state_dict(), temp_path)
+            logging.info(f"Saved intermediate model to {temp_path}")
+            
+            # Include temp path in result for next chunk
+            return {
+                "success": True,
+                "temp_model_path": temp_path,
+                "metrics": {
+                    "accuracy": final_accuracy,
+                    "training_time": training_time,
+                    "history": training_history
+                }
+            }
         
         # Save model
         try:
@@ -304,18 +409,6 @@ def train_model(df, params):
         buffer = BytesIO()
         torch.save(model.state_dict(), buffer)
         model_data = base64.b64encode(buffer.getvalue()).decode('utf-8')
-        
-        # Final evaluation
-        model.eval()
-        with torch.no_grad():
-            final_accuracy = 0.0
-            for batch_X, batch_y in test_loader:
-                batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
-                outputs = model(batch_X)
-                predicted = (torch.sigmoid(outputs) > 0.5).float()
-                final_accuracy += (predicted == batch_y).sum().item() / batch_y.size(0)
-            
-            final_accuracy /= len(test_loader)
         
         return {
             "success": True,
@@ -502,6 +595,209 @@ def health_check():
             "status": "unhealthy",
             "error": str(e)
         }
+
+def auto_tune_batch_size(model, X_sample, y_sample, initial_batch_size, device):
+    """Automatically tune batch size based on GPU memory.
+    
+    This function tries to find the largest batch size that fits in GPU memory
+    by testing progressively smaller batch sizes until one works.
+    
+    Args:
+        model: Model to use for testing
+        X_sample: Sample features to use for testing
+        y_sample: Sample labels to use for testing
+        initial_batch_size: Initial batch size to try
+        device: Device to use (cuda or cpu)
+        
+    Returns:
+        The largest batch size that fits in GPU memory
+    """
+    logging.info("Auto-tuning batch size for optimal GPU memory usage")
+    
+    # Start with the initial batch size
+    batch_size = initial_batch_size
+    
+    # Create a sample dataset
+    sample_dataset = ThreatDataset(X_sample, y_sample)
+    
+    # Try to find the maximum batch size that fits in GPU memory
+    while batch_size > 1:
+        try:
+            # Create a test loader with the current batch size
+            test_loader = DataLoader(sample_dataset, batch_size=batch_size)
+            
+            # Try a forward and backward pass
+            model.train()
+            for batch_X, batch_y in test_loader:
+                batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
+                
+                # Forward pass
+                outputs = model(batch_X)
+                loss_fn = nn.BCEWithLogitsLoss()
+                loss = loss_fn(outputs, batch_y)
+                
+                # Backward pass
+                loss.backward()
+                
+                # Clear gradients
+                model.zero_grad()
+                
+                # If we got here without OOM error, this batch size works
+                logging.info(f"Auto-tuned batch size: {batch_size}")
+                return batch_size
+                
+        except RuntimeError as e:
+            if "out of memory" in str(e).lower():
+                # Reduce batch size and try again
+                torch.cuda.empty_cache()
+                batch_size = max(1, batch_size // 2)
+                logging.info(f"Reducing batch size to {batch_size} due to OOM")
+            else:
+                # If it's not an OOM error, re-raise
+                raise
+    
+    # If we got here, even batch_size=1 doesn't work
+    logging.warning("Model may be too large for GPU memory even with batch_size=1")
+    return 1
+
+def enhanced_training_loop(model, train_loader, test_loader, optimizer, criterion, device, epochs, use_amp=False):
+    """Enhanced training loop with better error handling and monitoring."""
+    scaler = torch.cuda.amp.GradScaler() if use_amp else None
+    
+    # History tracking
+    training_history = {
+        'train_loss': [],
+        'val_loss': [],
+        'val_accuracy': [],
+        'gpu_memory': []
+    }
+    
+    # Training loop with robust error handling
+    start_time = time.time()
+    
+    for epoch in range(epochs):
+        try:
+            # Record GPU memory usage
+            if torch.cuda.is_available():
+                memory_allocated = torch.cuda.memory_allocated() / (1024 ** 3)  # GB
+                memory_reserved = torch.cuda.memory_reserved() / (1024 ** 3)    # GB
+                training_history['gpu_memory'].append({
+                    'allocated': memory_allocated,
+                    'reserved': memory_reserved
+                })
+                logging.info(f"GPU Memory: {memory_allocated:.2f}GB allocated, {memory_reserved:.2f}GB reserved")
+            
+            # Training phase with error recovery
+            model.train()
+            running_loss = 0.0
+            failed_batches = 0
+            
+            for batch_idx, (batch_X, batch_y) in enumerate(train_loader):
+                try:
+                    batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
+                    
+                    optimizer.zero_grad()
+                    
+                    if use_amp:
+                        with torch.cuda.amp.autocast():
+                            outputs = model(batch_X)
+                            loss = criterion(outputs, batch_y)
+                        
+                        scaler.scale(loss).backward()
+                        scaler.step(optimizer)
+                        scaler.update()
+                    else:
+                        outputs = model(batch_X)
+                        loss = criterion(outputs, batch_y)
+                        loss.backward()
+                        optimizer.step()
+                    
+                    running_loss += loss.item()
+                    
+                except RuntimeError as e:
+                    # Handle batch-specific errors
+                    failed_batches += 1
+                    if "out of memory" in str(e).lower():
+                        logging.warning(f"OOM error in batch {batch_idx}, skipping")
+                        torch.cuda.empty_cache()
+                        # If too many OOM errors, reduce batch size for next epoch
+                        if failed_batches > len(train_loader) // 4:
+                            raise RuntimeError("Too many OOM errors, consider reducing batch size")
+                    else:
+                        raise  # Re-raise other runtime errors
+            
+            epoch_train_loss = running_loss / len(train_loader)
+            training_history['train_loss'].append(epoch_train_loss)
+            
+            # Validation phase
+            model.eval()
+            val_loss = 0.0
+            correct = 0
+            total = 0
+            
+            with torch.no_grad():
+                for batch_X, batch_y in test_loader:
+                    batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
+                    outputs = model(batch_X)
+                    loss = criterion(outputs, batch_y)
+                    val_loss += loss.item()
+                    
+                    predicted = (torch.sigmoid(outputs) > 0.5).float()
+                    total += batch_y.size(0)
+                    correct += (predicted == batch_y).sum().item()
+            
+            epoch_val_loss = val_loss / len(test_loader)
+            epoch_val_accuracy = correct / total
+            
+            training_history['val_loss'].append(epoch_val_loss)
+            training_history['val_accuracy'].append(epoch_val_accuracy)
+            
+            logging.info(f"Epoch {epoch+1}/{epochs}, Train Loss: {epoch_train_loss:.4f}, "
+                      f"Val Loss: {epoch_val_loss:.4f}, Val Accuracy: {epoch_val_accuracy:.4f}")
+        
+        except Exception as e:
+            logging.error(f"Error in epoch {epoch+1}: {str(e)}")
+            logging.error(traceback.format_exc())
+            
+            # Attempt recovery
+            torch.cuda.empty_cache()
+            
+            # Save checkpoint to avoid losing progress
+            checkpoint_path = f"/tmp/training_checkpoint_epoch_{epoch}.pt"
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'training_history': training_history
+            }, checkpoint_path)
+            logging.info(f"Saved checkpoint to {checkpoint_path}")
+            
+            # Continue to next epoch instead of failing completely
+            continue
+    
+    training_time = time.time() - start_time
+    logging.info(f"Training completed in {training_time:.2f} seconds")
+    
+    # Final evaluation
+    model.eval()
+    with torch.no_grad():
+        final_accuracy = 0.0
+        for batch_X, batch_y in test_loader:
+            batch_X, batch_y = batch_X.to(device), batch_y.to(device).view(-1, 1)
+            outputs = model(batch_X)
+            predicted = (torch.sigmoid(outputs) > 0.5).float()
+            final_accuracy += (predicted == batch_y).sum().item() / batch_y.size(0)
+        
+        final_accuracy /= len(test_loader)
+    
+    return {
+        "success": True,
+        "metrics": {
+            "accuracy": final_accuracy,
+            "training_time": training_time,
+            "history": training_history
+        }
+    }
 
 def _handler(event):
     """
