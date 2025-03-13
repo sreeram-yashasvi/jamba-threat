@@ -13,7 +13,7 @@ from pathlib import Path
 logger = logging.getLogger(__name__)
 
 # Default path configurations
-DEFAULT_APP_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "../.."))
+DEFAULT_APP_DIR = os.environ.get("APP_DIR", "/app")
 DEFAULT_MODEL_DIR = os.path.join(DEFAULT_APP_DIR, "models")
 DEFAULT_LOGS_DIR = os.path.join(DEFAULT_APP_DIR, "logs")
 DEFAULT_DATA_DIR = os.path.join(DEFAULT_APP_DIR, "data")

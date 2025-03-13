@@ -103,7 +103,8 @@ def check_model_imports():
             # Verify specific classes exist in the module
             if hasattr(module, "JambaThreatModel") and hasattr(module, "ThreatDataset"):
                 logger.info(f"✓ Successfully imported model classes using {description}")
-                return True, None, module.__file__
+                module_file = getattr(module, "__file__", "unknown_location")
+                return True, None, module_file
             else:
                 logger.warning(f"✗ Module found but missing required classes using {description}")
         except Exception as e:
@@ -127,13 +128,13 @@ def _import_with_path_adjustment(module_name):
         module: Imported module object
     """
     # Add common paths to sys.path
-    app_dir = os.environ.get("APP_DIR", os.path.abspath(os.path.join(os.path.dirname(__file__), "../..")))
+    # Use absolute paths rather than relative to __file__
+    app_dir = os.environ.get("APP_DIR", "/app")
     src_dir = os.path.join(app_dir, "src")
     
     for path in [app_dir, src_dir]:
         if path not in sys.path:
             sys.path.append(path)
-            logger.info(f"Added {path} to sys.path")
     
     # Try to find the module spec
     spec = importlib.util.find_spec(module_name)

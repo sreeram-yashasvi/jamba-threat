@@ -72,8 +72,9 @@ MODEL_CACHE = {}
 
 # Import model classes
 try:
-    from jamba_model import JambaThreatModel, ThreatDataset
-    logging.info("Successfully imported JambaThreatModel and ThreatDataset")
+    from jamba.jamba_model import JambaThreatModel, ThreatDataset
+    from jamba.model_config import ModelConfig, DEFAULT_CPU_CONFIG, DEFAULT_GPU_CONFIG
+    logging.info("Successfully imported JambaThreatModel, ThreatDataset, and ModelConfig")
 except ImportError as e:
     logging.error(f"Failed to import model classes: {e}")
     logging.error(f"Python path: {sys.path}")
@@ -83,8 +84,46 @@ except ImportError as e:
     try:
         sys.path.append('/app')
         sys.path.append('/app/src')
-        from jamba_model import JambaThreatModel, ThreatDataset
-        logging.info("Successfully imported model classes using fallback strategy")
+        
+        # Try importing from jamba package first
+        try:
+            from jamba.jamba_model import JambaThreatModel, ThreatDataset
+            from jamba.model_config import ModelConfig, DEFAULT_CPU_CONFIG, DEFAULT_GPU_CONFIG
+            logging.info("Successfully imported model classes from jamba package")
+        except ImportError:
+            # Fallback to direct import
+            from jamba_model import JambaThreatModel, ThreatDataset
+            # Create a minimal ModelConfig class if not available
+            class ModelConfig:
+                def __init__(self, input_dim=512, hidden_dim=None, output_dim=2, dropout_rate=0.3,
+                             n_heads=None, feature_layers=None, version="1.0.0",
+                             use_mixed_precision=True, batch_size=128, learning_rate=0.001):
+                    self.version = version
+                    self.input_dim = input_dim
+                    self.hidden_dim = hidden_dim
+                    self.output_dim = output_dim
+                    self.dropout_rate = dropout_rate
+                    self.n_heads = n_heads
+                    self.feature_layers = feature_layers
+                    self.use_mixed_precision = use_mixed_precision
+                    self.batch_size = batch_size
+                    self.learning_rate = learning_rate
+                
+                def to_dict(self):
+                    return self.__dict__
+            
+            # Create default configs
+            DEFAULT_CPU_CONFIG = ModelConfig(
+                input_dim=512, hidden_dim=256, output_dim=2, dropout_rate=0.3,
+                n_heads=4, feature_layers=2, use_mixed_precision=False, batch_size=32
+            )
+            
+            DEFAULT_GPU_CONFIG = ModelConfig(
+                input_dim=512, hidden_dim=512, output_dim=2, dropout_rate=0.3,
+                n_heads=8, feature_layers=4, use_mixed_precision=True, batch_size=128
+            )
+            
+            logging.info("Successfully imported model classes using fallback strategy with minimal ModelConfig")
     except ImportError as e:
         logging.error(f"Fatal error: Could not import model classes: {e}")
         logging.error(traceback.format_exc())
@@ -118,8 +157,9 @@ def load_model(model_path: str, force_cpu: bool = False):
             input_dim = model_data.get("input_dim", 512)
             logging.info(f"Creating model with input dimension: {input_dim}")
             
-            # Initialize model
-            model = JambaThreatModel(input_dim=input_dim)
+            # Initialize model with config
+            config = ModelConfig(input_dim=input_dim)
+            model = JambaThreatModel(config)
             model.load_state_dict(model_data["state_dict"])
         else:
             # Full model serialization
@@ -163,7 +203,14 @@ def train_model(df, params):
             model = load_model_from_temp(temp_model_path)
             
             # For large models, store in external storage instead of returning directly
-            model_size = os.path.getsize(temp_model_path)
+            # Get model size - need to check if it's a file path or a loaded model
+            if isinstance(temp_model_path, str) and os.path.exists(temp_model_path):
+                model_size = os.path.getsize(temp_model_path)
+            else:
+                # Estimate size by serializing to a buffer
+                buffer = BytesIO()
+                torch.save(model, buffer)
+                model_size = len(buffer.getvalue())
             if model_size > MAX_RETURN_SIZE:
                 # Store in external storage and return URL
                 storage_url = store_model_in_external_storage(temp_model_path)
@@ -195,7 +242,16 @@ def train_model(df, params):
             # Initialize new model
             device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
             input_dim = len(feature_list)
-            model = JambaThreatModel(input_dim).to(device)
+            
+            # Create config with appropriate device settings
+            if torch.cuda.is_available():
+                config = DEFAULT_GPU_CONFIG
+                config.input_dim = input_dim
+            else:
+                config = DEFAULT_CPU_CONFIG
+                config.input_dim = input_dim
+                
+            model = JambaThreatModel(config).to(device)
             logging.info(f"Initialized new model with input dimension: {input_dim}")
         
         # Extract parameters
@@ -468,7 +524,15 @@ def predict(model_path, input_data):
                 # Fallback to hardcoded input dimension
                 input_dim = 28  # Standard input dimension for the model
             
-            model = JambaThreatModel(input_dim).to(device)
+            # Create config with appropriate device settings
+            if torch.cuda.is_available():
+                config = DEFAULT_GPU_CONFIG
+                config.input_dim = input_dim
+            else:
+                config = DEFAULT_CPU_CONFIG
+                config.input_dim = input_dim
+                
+            model = JambaThreatModel(config).to(device)
             
             try:
                 model.load_state_dict(torch.load(model_path, map_location=device))
@@ -570,7 +634,8 @@ def health_check():
                 input_dim = 28  # Standard input dimension for the model
             
             # Check if model can be initialized
-            model = JambaThreatModel(input_dim)
+            config = ModelConfig(input_dim=input_dim)
+            model = JambaThreatModel(config)
             
             # Create a sample input
             sample_input = torch.randn(4, input_dim)

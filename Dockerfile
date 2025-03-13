@@ -1,6 +1,11 @@
 FROM pytorch/pytorch:2.0.1-cuda11.7-cudnn8-runtime
 
-# Install system dependencies
+# Set labels
+LABEL maintainer="Jamba Threat Detection Team"
+LABEL version="2.0.0" 
+LABEL description="Jamba Threat Detection with RunPod GPU Training"
+
+# Install system dependencies in one RUN
 RUN apt-get update && apt-get install -y \
     build-essential \
     git \
@@ -11,25 +16,34 @@ RUN apt-get update && apt-get install -y \
 # Create app directory
 WORKDIR /app
 
-# Install Python dependencies - RunPod package first to avoid conflicts
-RUN pip install --no-cache-dir runpod==0.10.0
+# Upgrade pip and install Python dependencies in one layer
+RUN pip install --no-cache-dir --upgrade pip && \
+    pip install --no-cache-dir runpod==0.10.0 && \
+    pip install --no-cache-dir --ignore-installed \
+         requests==2.31.0 \
+         python-dotenv==1.0.1 \
+         pandas==2.0.3 \
+         numpy==1.24.3 \
+         tqdm==4.65.0 \
+         fastapi uvicorn
 
-# Copy requirements file
-COPY requirements.txt /app/
-RUN pip install --no-cache-dir -r requirements.txt
+# Create necessary directories in one command
+RUN mkdir -p /app/jamba_model /app/utils /app/src /app/docs /app/models /app/data /app/logs
 
-# Install debugging tools
-RUN pip install --no-cache-dir fastapi uvicorn python-dotenv
-
-# Create a proper Python module structure
-RUN mkdir -p /app/jamba_model
-
-# Copy model and handler files first and verify imports work
+# Copy model and handler files
 COPY src/jamba_model.py /app/jamba_model/model.py 
 COPY src/handler.py /app/handler.py
 
 # Create proper __init__.py for the module
 RUN echo "from .model import JambaThreatModel, ThreatDataset" > /app/jamba_model/__init__.py
+
+# Copy source and utility files
+COPY src/*.py /app/src/
+COPY src/utils/*.py /app/utils/
+COPY src/README_RUNPOD_TRAINING.md /app/docs/
+
+# Make scripts executable
+RUN chmod +x /app/src/*.py
 
 # Set environment variables
 ENV NVIDIA_VISIBLE_DEVICES=all
@@ -38,7 +52,7 @@ ENV PYTHONDONTWRITEBYTECODE=1
 ENV PYTHONUNBUFFERED=1
 ENV PYTHONPATH=/app
 
-# Create a startup verification script
+# Create startup verification script in a single RUN
 RUN echo '#!/bin/bash' > /app/startup_check.sh && \
     echo 'echo "Starting container validation checks..."' >> /app/startup_check.sh && \
     echo 'echo "Checking Python imports..."' >> /app/startup_check.sh && \
@@ -54,18 +68,18 @@ RUN echo '#!/bin/bash' > /app/startup_check.sh && \
     echo 'echo "✓ All validation checks passed"' >> /app/startup_check.sh && \
     chmod +x /app/startup_check.sh
 
-# Copy the startup wrapper script
+# Copy the startup wrapper script and make it executable
 COPY src/runpod_entry.sh /app/runpod_entry.sh
 RUN chmod +x /app/runpod_entry.sh
 
-# RunPod specific settings
+# Set RunPod specific environment variables
 ENV RUNPOD_DEBUG_LEVEL=DEBUG
 ENV RUNPOD_STOP_SIGNAL=SIGINT
 ENV RUNPOD_TIMEOUT_SECONDS=900
 
-# Set healthcheck to verify the container is working properly
+# Healthcheck to verify container status
 HEALTHCHECK --interval=30s --timeout=10s --start-period=5s --retries=3 \
     CMD python -c "import torch; from jamba_model import JambaThreatModel; print('Health check passed')" || exit 1
 
-# RunPod entrypoint - Use our wrapper script to ensure proper startup
+# Use the startup script as the entrypoint
 CMD ["/app/runpod_entry.sh"] 

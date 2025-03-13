@@ -21,3 +21,6 @@ accelerate==0.23.0
 # NVIDIA specific requirements
 nvidia-ml-py==11.525.112
 bitsandbytes==0.41.0  # For 8-bit quantization
+# RunPod training requirements
+requests==2.31.0  # For API calls to RunPod
+runpod==0.10.0    # RunPod SDK

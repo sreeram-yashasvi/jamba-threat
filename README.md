@@ -12,6 +12,7 @@ This project fine-tunes AI21's Jamba model (or alternative models like DistilBER
 - Fine-tuning of state-of-the-art language models
 - Memory-optimized training for large models
 - GPU acceleration with advanced features like mixed precision and 8-bit quantization
+- RunPod GPU training integration for scalable, cost-effective training
 - Comprehensive logging and evaluation
 
 ## Requirements
@@ -21,6 +22,7 @@ This project fine-tunes AI21's Jamba model (or alternative models like DistilBER
 - Transformers 4.30+
 - CUDA-compatible GPU (recommended for large models)
 - Hugging Face account with access token (for gated models like Jamba)
+- RunPod account with API key (for GPU cloud training)
 
 ## Installation
 
@@ -83,7 +85,9 @@ The pipeline can now be run with GPU acceleration using RunPod. This allows for 
 
 ### Training with RunPod GPUs
 
-To run the full pipeline with RunPod GPU training:
+There are multiple ways to use RunPod GPUs for training:
+
+#### 1. Using the run_pipeline.py script
 
 ```bash
 # Set your RunPod API key and endpoint ID
@@ -98,6 +102,34 @@ You can also specify the API key and endpoint ID directly:
 
 ```bash
 ./run_pipeline.py --runpod --api-key your_runpod_api_key --endpoint-id your_endpoint_id
+```
+
+#### 2. Using the dedicated training script
+
+For more control over the training process, you can use the dedicated `run_training.py` script:
+
+```bash
+python src/run_training.py --data-path data/jamba_training_data.csv --output-model models/jamba_model.pth
+```
+
+With custom parameters:
+
+```bash
+python src/run_training.py \
+  --data-path data/jamba_training_data.csv \
+  --output-model models/jamba_model.pth \
+  --epochs 50 \
+  --learning-rate 0.0005 \
+  --batch-size 256
+```
+
+Using a configuration file:
+
+```bash
+python src/run_training.py \
+  --data-path data/jamba_training_data.csv \
+  --output-model models/jamba_model.pth \
+  --config-file training_config.json
 ```
 
 ### Pipeline Options
@@ -132,6 +164,70 @@ Train with GPU and more epochs:
 ```bash
 ./run_pipeline.py --runpod --epochs 100 --batch-size 512
 ```
+
+## RunPod Training Details
+
+The system now includes built-in support for training models using RunPod's serverless GPU infrastructure, which provides scalable and cost-effective access to high-performance GPUs.
+
+### How RunPod Training Works
+
+1. **Data Preparation**: Your local training data is processed and prepared for submission
+2. **Chunked Data Transfer**: For large datasets, the system automatically splits the data into chunks to comply with RunPod's 10MiB request size limit
+3. **Training Execution**: The data is sent to your RunPod endpoint where the training occurs on GPU hardware
+4. **Status Monitoring**: The training progress is monitored with periodic status checks
+5. **Model Retrieval**: Upon completion, the trained model and metrics are retrieved and saved locally
+
+### RunPod Training Components
+
+The RunPod training system consists of several key components:
+
+- **`src/train_runpod.py`**: Core class (`RunPodTrainer`) that handles the end-to-end training process
+- **`src/run_training.py`**: User-friendly command-line interface for RunPod training
+- **`src/handler.py`**: Contains the `train_model` function that executes on the RunPod server
+- **`src/runpod_entry.sh`**: Container entry script for RunPod serverless deployment
+
+### Using the RunPodTrainer API
+
+For programmatic access, you can use the `RunPodTrainer` class directly in your code:
+
+```python
+from src.train_runpod import RunPodTrainer
+import pandas as pd
+
+# Initialize the trainer
+trainer = RunPodTrainer(api_key="your_api_key", endpoint_id="your_endpoint_id")
+
+# Prepare the data
+data = trainer.prepare_data("path/to/data.csv")
+
+# Define training parameters
+params = {
+    "epochs": 30,
+    "learning_rate": 0.001,
+    "batch_size": 128
+}
+
+# Submit the training job
+job_result = trainer.submit_training_job(data, params)
+job_id = job_result["id"]
+
+# Wait for the job to complete and get results
+result = trainer.wait_for_completion(job_id)
+
+# Save the model
+trainer.save_model(result, "models/jamba_model.pth")
+```
+
+### Training Configuration Options
+
+When using RunPod training, you can customize the following parameters:
+
+- **epochs**: Number of training epochs (default: 30)
+- **learning_rate**: Learning rate for optimization (default: 0.001)
+- **batch_size**: Batch size for training (default: 128)
+- **target_column**: Column name containing the target labels (default: "is_threat")
+
+These can be specified via command-line arguments or in a JSON configuration file.
 
 ## Deployment on RunPod.io
 
@@ -424,64 +520,43 @@ huggingface-cli whoami
 python src/train_jamba.py --dataloader-num-workers 4
 ```
 
-## Troubleshooting RunPod Deployments
+## Troubleshooting RunPod Training
 
-If you encounter issues with RunPod container deployments, we've added several tools and improvements to help diagnose and fix problems:
+If you encounter issues with RunPod training, here are some specific troubleshooting steps:
 
-### Using the Health Check Script
+### Size Limitations
 
-The repository includes a health check script that can verify if your RunPod endpoint is functioning correctly:
+RunPod has a 10MiB request size limit. The system automatically handles this by:
+- Compressing data when possible
+- Splitting large datasets into chunks
+- Using temporary storage for very large datasets
 
-```bash
-# Set your RunPod credentials
-export RUNPOD_API_KEY=your_api_key
-export RUNPOD_ENDPOINT_ID=your_endpoint_id
+If you still encounter size issues, try:
+- Reducing the dataset size
+- Using a more aggressive sampling approach
+- Pre-uploading the data to a location accessible by the RunPod endpoint
 
-# Run the health check
-./src/runpod_health_check.py
-```
+### Authentication Issues
 
-This will perform a basic health check and report detailed information about your endpoint's status.
+If you encounter authentication issues:
+- Verify your API key is correct and has not expired
+- Check that your endpoint ID is correct
+- Ensure your RunPod account has sufficient credits
 
-### Common RunPod Container Issues
+### Training Failures
 
-1. **Container Startup Failures**:
-   - The container now includes enhanced startup checks and logging
-   - Check the RunPod logs for detailed error messages
-   - The startup wrapper script will provide specific error information
+If training fails on RunPod:
+- Check the logs for error messages
+- Verify your data format is correct
+- Try with a smaller batch size (e.g., `--batch-size 32`)
+- Check if your endpoint has sufficient GPU memory
 
-2. **Import Errors**:
-   - We've improved the module structure to be more robust
-   - The container performs validation checks during startup
-   - Any import errors will be clearly reported in the logs
+### Connection Timeouts
 
-3. **Environment Variable Issues**:
-   - Make sure to set `RUNPOD_API_KEY` and `RUNPOD_ENDPOINT_ID` in your RunPod environment
-   - You can also create a `.env` file in the container
-
-### Manual Container Validation
-
-If you need to manually verify a container:
-
-1. Connect to your RunPod instance via SSH
-2. Run the validation script:
-   ```bash
-   /app/startup_check.sh
-   ```
-3. Check the RunPod logs for detailed output:
-   ```bash
-   cat /var/log/runpod-worker.log
-   ```
-
-### Rebuilding the Container
-
-If you've updated the codebase, make sure your RunPod endpoint is using the latest version:
-
-1. Go to your RunPod dashboard
-2. Select your endpoint
-3. Click "Configuration"
-4. Under "Image", verify it's pointing to the correct branch/commit
-5. Click "Update" to rebuild with the latest changes
+For long-running training jobs:
+- Increase the timeout using the built-in parameter (`--timeout 7200` for 2 hours)
+- Break your training into smaller epochs
+- Use the status checking utility: `python src/runpod_health_check.py`
 
 ## License
 
@@ -491,4 +566,5 @@ This project is licensed under the MIT License - see the LICENSE file for detail
 
 - AI21 Labs for the Jamba model
 - Hugging Face for the Transformers library
+- RunPod for the serverless GPU infrastructure
 - The open-source community for tools and libraries 

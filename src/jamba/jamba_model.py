@@ -10,6 +10,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import Dataset
+from typing import Optional, Dict, Any, Tuple
+from .model_config import ModelConfig, VERSION_COMPATIBILITY
 
 # Configure logging
 logging.basicConfig(
@@ -33,162 +35,177 @@ def set_seed(seed=42):
 # Set seeds for reproducibility
 set_seed()
 
+logger = logging.getLogger(__name__)
+
 class JambaThreatModel(nn.Module):
-    """
-    Jamba Threat Detection Model - Neural network for identifying threats in network traffic
-    """
-    def __init__(self, input_dim=512, hidden_dim=None, output_dim=2, dropout_rate=0.3):
+    """Jamba Threat Detection Model with versioning and configuration management"""
+    
+    def __init__(self, config: ModelConfig):
         super(JambaThreatModel, self).__init__()
+        self.config = config
         
-        # Log initialization parameters
-        logging.info(f"Initializing JambaThreatModel with input_dim={input_dim}, output_dim={output_dim}")
-        logging.info(f"CUDA available: {torch.cuda.is_available()}")
+        # Log initialization
+        logger.info(f"Initializing JambaThreatModel v{config.version}")
+        logger.info(f"Config: {config.to_dict()}")
         
-        # Store input dimension for serialization checks
-        self.input_dim = input_dim
+        # Calculate dimensions
+        self.hidden_dim = config.hidden_dim or max(128, min(512, int(config.input_dim * 1.5)))
+        self.n_heads = config.n_heads or max(4, min(8, config.input_dim // 64))
+        self.feature_layers = config.feature_layers or max(2, min(4, config.input_dim // 128))
         
-        # Calculate optimal dimensions based on input size
-        if hidden_dim is None:
-            hidden_dim = max(128, min(512, int(input_dim * 1.5)))
-        
-        # Calculate optimal number of attention heads
-        n_heads = max(4, min(8, input_dim // 64))
-        
-        # Calculate feature extraction layers
-        feature_layers = max(2, min(4, input_dim // 128))
-        
-        logging.info(f"Derived architecture parameters: hidden_dim={hidden_dim}, n_heads={n_heads}, feature_layers={feature_layers}")
-        
-        # Input projection layer (only if needed)
-        if input_dim != hidden_dim:
-            self.projection = nn.Linear(input_dim, hidden_dim)
+        # Input projection
+        if config.input_dim != self.hidden_dim:
+            self.projection = nn.Linear(config.input_dim, self.hidden_dim)
             self.use_projection = True
         else:
+            self.projection = nn.Identity()
             self.use_projection = False
         
-        # Feature extraction layers with batch normalization
+        # Feature extraction layers
         feat_layers = []
-        current_dim = hidden_dim
-        for i in range(feature_layers):
-            layer_dim = hidden_dim // (2 ** min(i, 2))
-            feat_layers.append(nn.Linear(current_dim, layer_dim))
-            feat_layers.append(nn.BatchNorm1d(layer_dim))
-            feat_layers.append(nn.SiLU())  # SiLU (Swish) for better gradient flow
-            feat_layers.append(nn.Dropout(dropout_rate))
+        current_dim = self.hidden_dim
+        for i in range(self.feature_layers):
+            layer_dim = self.hidden_dim // (2 ** min(i, 2))
+            feat_layers.extend([
+                nn.Linear(current_dim, layer_dim),
+                nn.BatchNorm1d(layer_dim),
+                nn.SiLU(),
+                nn.Dropout(config.dropout_rate)
+            ])
             current_dim = layer_dim
         
         self.feature_extraction = nn.Sequential(*feat_layers)
         
-        # Self-attention mechanism
+        # Self-attention
         self.attention = nn.MultiheadAttention(
             embed_dim=current_dim,
-            num_heads=n_heads,
-            dropout=dropout_rate,
+            num_heads=self.n_heads,
+            dropout=config.dropout_rate,
             batch_first=True
         )
         
-        # Temporal processing with GRU
+        # Temporal processing
         self.gru = nn.GRU(
             current_dim,
             current_dim,
             num_layers=2,
             batch_first=True,
-            dropout=dropout_rate if feature_layers > 1 else 0,
+            dropout=config.dropout_rate if self.feature_layers > 1 else 0,
             bidirectional=True
         )
         
-        # Output layers with residual connection
-        self.out_linear1 = nn.Linear(current_dim * 2, hidden_dim)
-        self.out_bn = nn.BatchNorm1d(hidden_dim)
-        self.out_linear2 = nn.Linear(hidden_dim, output_dim)
-        
-    def forward(self, x):
-        # Ensure input is proper tensor
-        if not isinstance(x, torch.Tensor):
-            x = torch.tensor(x, dtype=torch.float32)
-        
-        # Reshape if needed (handles both single samples and batches)
-        if len(x.shape) == 1:
-            x = x.unsqueeze(0)  # Add batch dimension
-            
-        batch_size = x.shape[0]
-        
-        # Log input shape for debugging
-        logging.debug(f"Input shape: {x.shape}")
-        
-        # Apply projection if configured
-        if self.use_projection:
-            x = self.projection(x)
-        
-        # Feature extraction
-        x = self.feature_extraction(x)
-        
-        # Prepare for attention (need sequence dimension)
-        if len(x.shape) == 2:
-            # For non-sequential data, create a sequence of length 1
-            x_seq = x.unsqueeze(1)
-        else:
-            x_seq = x
-        
-        # Self-attention
+        # Output layers
+        self.out_linear1 = nn.Linear(current_dim * 2, self.hidden_dim)
+        self.out_bn = nn.BatchNorm1d(self.hidden_dim)
+        self.out_linear2 = nn.Linear(self.hidden_dim, config.output_dim)
+    
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         try:
-            attn_output, _ = self.attention(x_seq, x_seq, x_seq)
+            # Input validation
+            if not isinstance(x, torch.Tensor):
+                x = torch.tensor(x, dtype=torch.float32)
             
-            # GRU processing
-            gru_out, _ = self.gru(attn_output)
+            if len(x.shape) == 1:
+                x = x.unsqueeze(0)
             
-            # Get final state
-            if len(gru_out.shape) == 3:
-                # Take the last output for sequence data
-                gru_out = gru_out[:, -1, :]
+            batch_size = x.shape[0]
+            
+            # Project input if needed
+            x = self.projection(x)
+            
+            # Feature extraction
+            x = self.feature_extraction(x)
+            
+            # Prepare for attention
+            x_seq = x.unsqueeze(1) if len(x.shape) == 2 else x
+            
+            # Self-attention with error handling
+            try:
+                attn_output, _ = self.attention(x_seq, x_seq, x_seq)
                 
-            # Output layers with residual connection
+                # GRU processing
+                gru_out, _ = self.gru(attn_output)
+                
+                # Get final state
+                if len(gru_out.shape) == 3:
+                    gru_out = gru_out[:, -1, :]
+                
+            except RuntimeError as e:
+                logger.warning(f"Attention mechanism failed, using fallback: {str(e)}")
+                gru_out = x
+            
+            # Output layers
             out = self.out_linear1(gru_out)
             out = self.out_bn(out)
-            out = F.silu(out)  # SiLU activation
+            out = F.silu(out)
             out = self.out_linear2(out)
             
             return out
             
         except Exception as e:
-            logging.error(f"Error in forward pass: {e}")
-            # Fallback to simpler processing if attention fails
-            out = self.out_linear1(x)
-            out = self.out_bn(out)
-            out = F.silu(out)
-            out = self.out_linear2(out)
-            return out
+            logger.error(f"Error in forward pass: {str(e)}")
+            raise
     
-    def get_embedding(self, x):
-        """Extract feature embeddings from the model"""
-        if not isinstance(x, torch.Tensor):
-            x = torch.tensor(x, dtype=torch.float32)
+    def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
+        """Extract feature embeddings"""
+        with torch.no_grad():
+            if not isinstance(x, torch.Tensor):
+                x = torch.tensor(x, dtype=torch.float32)
             
-        if len(x.shape) == 1:
-            x = x.unsqueeze(0)
+            if len(x.shape) == 1:
+                x = x.unsqueeze(0)
             
-        if self.use_projection:
             x = self.projection(x)
-            
-        return self.feature_extraction(x)
+            return self.feature_extraction(x)
     
-    def __getstate__(self):
-        """Custom state management for improved serialization"""
-        state = self.__dict__.copy()
-        # Add model metadata
-        state['_model_version'] = '1.0.0'
-        state['_serialization_date'] = torch.tensor(
-            [torch.cuda.current_device() if torch.cuda.is_available() else -1]
-        )
-        return state
+    def save(self, path: str):
+        """Save model with configuration"""
+        save_dict = {
+            'model_state': self.state_dict(),
+            'config': self.config.to_dict(),
+            'version': self.config.version
+        }
+        os.makedirs(os.path.dirname(path), exist_ok=True)
+        torch.save(save_dict, path)
+        logger.info(f"Model saved to {path}")
     
-    def __setstate__(self, state):
-        """Custom state loading for improved deserialization"""
-        version = state.pop('_model_version', None)
-        if version:
-            logging.info(f"Loading model version: {version}")
+    @classmethod
+    def load(cls, path: str) -> 'JambaThreatModel':
+        """Load model with version compatibility check"""
+        if not os.path.exists(path):
+            raise FileNotFoundError(f"Model file not found: {path}")
         
-        self.__dict__.update(state)
+        save_dict = torch.load(path)
+        
+        # Version compatibility check
+        model_version = save_dict.get('version', '0.9.0')  # Default for old models
+        current_version = ModelConfig().version
+        
+        if current_version not in VERSION_COMPATIBILITY.get(model_version, []):
+            raise ValueError(
+                f"Model version {model_version} is not compatible with current version {current_version}"
+            )
+        
+        # Create config and model
+        config = ModelConfig.from_dict(save_dict['config'])
+        model = cls(config)
+        model.load_state_dict(save_dict['model_state'])
+        
+        logger.info(f"Loaded model version {model_version}")
+        return model
+
+def create_model(config: Optional[ModelConfig] = None) -> JambaThreatModel:
+    """Factory function to create model with proper configuration"""
+    if config is None:
+        config = ModelConfig()
+        
+    # Determine if GPU is available and select appropriate config
+    if torch.cuda.is_available():
+        config = ModelConfig(**{**config.to_dict(), **DEFAULT_GPU_CONFIG.to_dict()})
+    else:
+        config = ModelConfig(**{**config.to_dict(), **DEFAULT_CPU_CONFIG.to_dict()})
+    
+    return JambaThreatModel(config)
 
 class ThreatDataset(Dataset):
     """Dataset for loading threat detection data"""

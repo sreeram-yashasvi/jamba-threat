@@ -190,63 +190,100 @@ class RunPodTrainer:
         return temp_file_path, "csv"
     
     def submit_training_job(self, data, params):
-        """Submit a training job to RunPod with proper chunking support."""
+        """Submit a training job to RunPod with efficient chunking.
+        
+        Args:
+            data: DataFrame of training data
+            params: Dictionary of training parameters
+            
+        Returns:
+            Dictionary with job information
+        """
+        logger.info("Preparing to submit training job to RunPod")
         
         # Calculate total payload size
         data_records = data.to_dict(orient='records')
-        full_payload_size = len(json.dumps({"input": {"data": data_records}}).encode('utf-8'))
+        payload_estimate = {
+            "input": {
+                "operation": "train",
+                "data": data_records,
+                "params": params
+            }
+        }
+        payload_size = len(json.dumps(payload_estimate).encode('utf-8'))
+        logger.info(f"Estimated payload size: {payload_size/1024:.2f} KB")
         
-        # If data fits within limit, send directly
-        if full_payload_size < MAX_PAYLOAD_SIZE:
-            return self._submit_single_job(data_records, params)
-        
-        # Use true chunking for large datasets
-        logger.info(f"Dataset too large ({full_payload_size/1024:.2f} KB), splitting into chunks")
-        
-        # Determine optimal chunk size through binary search
-        def can_fit(num_records):
-            sample = data_records[:num_records]
-            size = len(json.dumps({"input": {"data": sample}}).encode('utf-8'))
-            return size < MAX_PAYLOAD_SIZE * 0.9  # 90% of limit for safety
-        
-        # Binary search for largest chunk size that fits
-        low, high = 1, len(data_records)
-        optimal_chunk_size = 1
-        while low <= high:
-            mid = (low + high) // 2
-            if can_fit(mid):
-                optimal_chunk_size = mid
-                low = mid + 1
-            else:
-                high = mid - 1
+        # If small enough, send as a single job
+        if payload_size < MAX_PAYLOAD_SIZE:
+            logger.info("Data fits within payload size limit, submitting as single job")
+            payload = payload_estimate
             
-        logger.info(f"Optimal chunk size: {optimal_chunk_size} records")
+            response = requests.post(f"{self.base_url}/run", headers=self.headers, json=payload)
+            
+            if response.status_code == 200:
+                result = response.json()
+                logger.info(f"Job submitted successfully. Job ID: {result.get('id')}")
+                return result
+            else:
+                logger.error(f"Failed to submit job. Status code: {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                raise RuntimeError(f"Failed to submit job: {response.text}")
         
-        # Split data into chunks
-        chunks = [data_records[i:i+optimal_chunk_size] for i in range(0, len(data_records), optimal_chunk_size)]
+        # For larger datasets, use true chunking
+        logger.info("Dataset too large, implementing chunked training")
+        
+        # Split data into manageable chunks
+        chunks = self.split_dataframe(data, MAX_PAYLOAD_SIZE)
         logger.info(f"Split dataset into {len(chunks)} chunks")
         
-        # Create multi-stage training job
-        # 1. Submit first chunk with initialization flag
+        if not chunks:
+            raise ValueError("Failed to split dataset into chunks")
+        
+        # Process chunks sequentially
+        # 1. First chunk initializes the model
+        first_chunk = chunks[0]
         first_params = params.copy()
         first_params["is_chunk"] = True
         first_params["chunk_number"] = 1
         first_params["total_chunks"] = len(chunks)
         first_params["initialize_model"] = True
         
-        job_result = self._submit_single_job(chunks[0], first_params)
-        job_id = job_result.get("id")
+        # Submit first chunk
+        logger.info(f"Submitting first chunk with {len(first_chunk)} records")
+        first_payload = {
+            "input": {
+                "operation": "train",
+                "data": first_chunk.to_dict(orient='records'),
+                "params": first_params
+            }
+        }
+        
+        response = requests.post(f"{self.base_url}/run", headers=self.headers, json=first_payload)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to submit first chunk. Status code: {response.status_code}")
+            logger.error(f"Response: {response.text}")
+            raise RuntimeError(f"Failed to submit first chunk: {response.text}")
+        
+        # Get job ID from response
+        first_result = response.json()
+        job_id = first_result.get("id")
+        logger.info(f"First chunk submitted successfully. Job ID: {job_id}")
         
         # Wait for first chunk to complete
-        result = self.wait_for_completion(job_id)
+        first_output = self.wait_for_completion(job_id)
         
-        # Ensure temp model was saved
-        if not result.get("success") or "temp_model_path" not in result:
-            raise RuntimeError("Failed to initialize model with first chunk")
+        if not first_output.get("success", False):
+            logger.error(f"First chunk failed: {first_output.get('error', 'Unknown error')}")
+            raise RuntimeError(f"First chunk failed: {first_output.get('error', 'Unknown error')}")
         
-        # 2. Submit remaining chunks sequentially, using previous model
-        temp_model_path = result["temp_model_path"]
+        # Get temp model path for continuing training
+        temp_model_path = first_output.get("temp_model_path")
+        if not temp_model_path:
+            logger.error("First chunk did not return a temporary model path")
+            raise RuntimeError("First chunk did not return a temporary model path")
         
+        # 2. Process remaining chunks
         for i, chunk in enumerate(chunks[1:], 2):
             chunk_params = params.copy()
             chunk_params["is_chunk"] = True
@@ -254,26 +291,69 @@ class RunPodTrainer:
             chunk_params["total_chunks"] = len(chunks)
             chunk_params["temp_model_path"] = temp_model_path
             
-            job_result = self._submit_single_job(chunk, chunk_params)
-            job_id = job_result.get("id")
+            # Submit chunk
+            logger.info(f"Submitting chunk {i}/{len(chunks)} with {len(chunk)} records")
+            chunk_payload = {
+                "input": {
+                    "operation": "train",
+                    "data": chunk.to_dict(orient='records'),
+                    "params": chunk_params
+                }
+            }
+            
+            response = requests.post(f"{self.base_url}/run", headers=self.headers, json=chunk_payload)
+            
+            if response.status_code != 200:
+                logger.error(f"Failed to submit chunk {i}. Status code: {response.status_code}")
+                logger.error(f"Response: {response.text}")
+                raise RuntimeError(f"Failed to submit chunk {i}: {response.text}")
+            
+            # Get job ID from response
+            chunk_result = response.json()
+            job_id = chunk_result.get("id")
+            logger.info(f"Chunk {i} submitted successfully. Job ID: {job_id}")
             
             # Wait for chunk to complete
-            result = self.wait_for_completion(job_id)
+            chunk_output = self.wait_for_completion(job_id)
+            
+            if not chunk_output.get("success", False):
+                logger.error(f"Chunk {i} failed: {chunk_output.get('error', 'Unknown error')}")
+                raise RuntimeError(f"Chunk {i} failed: {chunk_output.get('error', 'Unknown error')}")
             
             # Update temp model path for next chunk
-            if not result.get("success"):
-                raise RuntimeError(f"Failed to process chunk {i}")
-            
-            temp_model_path = result.get("temp_model_path", temp_model_path)
+            new_temp_model_path = chunk_output.get("temp_model_path")
+            if new_temp_model_path:
+                temp_model_path = new_temp_model_path
+                logger.info(f"Updated temporary model path: {temp_model_path}")
         
         # 3. Submit final job to retrieve complete model
         final_params = params.copy()
         final_params["is_final"] = True
         final_params["temp_model_path"] = temp_model_path
         
-        final_job = self._submit_single_job([], final_params)
-        final_result = self.wait_for_completion(final_job.get("id"))
+        # Submit final job (no data needed)
+        logger.info("Submitting final job to retrieve trained model")
+        final_payload = {
+            "input": {
+                "operation": "train",
+                "data": [],  # No data needed for final job
+                "params": final_params
+            }
+        }
         
+        response = requests.post(f"{self.base_url}/run", headers=self.headers, json=final_payload)
+        
+        if response.status_code != 200:
+            logger.error(f"Failed to submit final job. Status code: {response.status_code}")
+            logger.error(f"Response: {response.text}")
+            raise RuntimeError(f"Failed to submit final job: {response.text}")
+        
+        # Get job ID from response
+        final_result = response.json()
+        job_id = final_result.get("id")
+        logger.info(f"Final job submitted successfully. Job ID: {job_id}")
+        
+        # This job ID will be used to retrieve the final model
         return final_result
     
     def check_job_status(self, job_id: str) -> Dict[str, Any]:
