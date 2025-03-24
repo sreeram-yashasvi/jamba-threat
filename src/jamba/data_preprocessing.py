@@ -21,6 +21,7 @@ class DataPreprocessor:
         self.numerical_columns = []
         self.target_column = None
         self.config_path = config_path
+        self.column_means = {}
         
     def analyze_data(self, df: pd.DataFrame) -> None:
         """Analyze data types and identify columns for preprocessing"""
@@ -34,37 +35,31 @@ class DataPreprocessor:
         logger.info(f"Found {len(self.categorical_columns)} categorical columns")
     
     def validate_data(self, df: pd.DataFrame) -> Tuple[bool, str]:
-        """Validate data quality"""
-        logger.info("Validating data quality...")
-        
-        # Check for missing values
-        missing = df.isnull().sum()
-        if missing.any():
-            return False, f"Missing values found in columns: {missing[missing > 0].to_dict()}"
-        
-        # Check for infinite values in numeric columns
-        if not df[self.numerical_columns].replace([np.inf, -np.inf], np.nan).isnull().sum().any():
-            return False, "Infinite values found in numeric columns"
-        
-        # Check for constant columns
-        constant_cols = [col for col in df.columns if df[col].nunique() == 1]
-        if constant_cols:
-            return False, f"Constant columns found: {constant_cols}"
-        
-        # Check for low variance in numeric columns
-        low_var_cols = [col for col in self.numerical_columns 
-                       if df[col].std() < 1e-6]
-        if low_var_cols:
-            logger.warning(f"Low variance columns found: {low_var_cols}")
-        
-        return True, "Data validation passed"
-    
-    def preprocess(self, df: pd.DataFrame, target_column: str, 
-                  is_training: bool = True) -> Tuple[pd.DataFrame, Optional[pd.Series]]:
-        """Preprocess data with validation and proper error handling"""
+        """Validate the input data"""
         try:
-            logger.info("Starting data preprocessing...")
+            # Check for missing values
+            if df.isnull().any().any():
+                return False, "Missing values found in data"
             
+            # Check for infinite values and replace with NaN
+            if np.isinf(df.select_dtypes(include=np.number).values).any():
+                logger.warning("Infinite values found, replacing with NaN")
+                df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            
+            # Check data types
+            numeric_cols = df.select_dtypes(include=np.number).columns
+            if len(numeric_cols) == 0:
+                return False, "No numeric columns found"
+            
+            return True, "Data validation passed"
+        except Exception as e:
+            return False, f"Validation error: {str(e)}"
+    
+    def preprocess(self, df: pd.DataFrame, target_column: str, is_training: bool = False) -> Tuple[np.ndarray, np.ndarray]:
+        """Preprocess the input data"""
+        logger.info("Starting data preprocessing...")
+        
+        try:
             # Store target column name
             self.target_column = target_column
             
@@ -73,35 +68,31 @@ class DataPreprocessor:
                 self.analyze_data(df)
             
             # Validate data
+            logger.info("Validating data quality...")
             is_valid, message = self.validate_data(df)
             if not is_valid:
                 raise ValueError(f"Data validation failed: {message}")
             
+            # Handle infinite values
+            df = df.copy()
+            df.replace([np.inf, -np.inf], np.nan, inplace=True)
+            
+            # Fill NaN values with mean for numeric columns
+            numeric_cols = [col for col in self.numerical_columns if col != target_column]
+            for col in numeric_cols:
+                if is_training:
+                    self.column_means[col] = df[col].mean()
+                df[col].fillna(self.column_means.get(col, 0), inplace=True)
+            
             # Separate features and target
-            X = df.drop(columns=[target_column])
+            X = df[numeric_cols]
             y = df[target_column] if target_column in df.columns else None
             
-            # Handle categorical columns
-            for col in self.categorical_columns:
-                if col in X.columns:  # Skip if column is target
-                    if is_training:
-                        self.label_encoders[col] = LabelEncoder()
-                        X[col] = self.label_encoders[col].fit_transform(X[col])
-                    else:
-                        if col in self.label_encoders:
-                            # Handle unknown categories
-                            unknown_values = ~X[col].isin(self.label_encoders[col].classes_)
-                            if unknown_values.any():
-                                logger.warning(f"Unknown categories in {col}: {X[col][unknown_values].unique()}")
-                                # Add unknown category handling here if needed
-                            X[col] = self.label_encoders[col].transform(X[col])
-            
             # Scale numerical features
-            numerical_features = X[self.numerical_columns]
             if is_training:
-                X[self.numerical_columns] = self.scaler.fit_transform(numerical_features)
+                X = pd.DataFrame(self.scaler.fit_transform(X), columns=X.columns)
             else:
-                X[self.numerical_columns] = self.scaler.transform(numerical_features)
+                X = pd.DataFrame(self.scaler.transform(X), columns=X.columns)
             
             logger.info("Data preprocessing completed successfully")
             return X, y
@@ -117,7 +108,8 @@ class DataPreprocessor:
             'label_encoders': self.label_encoders,
             'categorical_columns': self.categorical_columns,
             'numerical_columns': self.numerical_columns,
-            'target_column': self.target_column
+            'target_column': self.target_column,
+            'column_means': self.column_means
         }
         os.makedirs(os.path.dirname(path), exist_ok=True)
         joblib.dump(save_dict, path)
@@ -134,6 +126,7 @@ class DataPreprocessor:
         self.categorical_columns = save_dict['categorical_columns']
         self.numerical_columns = save_dict['numerical_columns']
         self.target_column = save_dict['target_column']
+        self.column_means = save_dict['column_means']
         logger.info(f"Preprocessor state loaded from {path}")
 
 def create_preprocessor(data_path: str, target_column: str, 

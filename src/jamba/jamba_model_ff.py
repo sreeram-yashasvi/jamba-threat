@@ -34,6 +34,7 @@ logging.basicConfig(
 )
 
 # Set seeds for deterministic behavior
+
 def set_seed(seed=42):
     """Set seeds for deterministic behavior"""
     random.seed(seed)
@@ -106,12 +107,14 @@ class JambaThreatModel(nn.Module):
         with torch.no_grad():
             return self.feature_extractor(x)
 
+
 def create_model(config: Optional[Dict[str, Any]] = None) -> JambaThreatModel:
     """Create a new instance of the model with optional config override."""
     from .model_config import ModelConfig
     if config is None:
         config = {}
     return JambaThreatModel(ModelConfig(**config))
+
 
 def load_model(path: Union[str, Path], device: str = 'cpu') -> JambaThreatModel:
     """Load a model from disk."""
@@ -125,6 +128,7 @@ def load_model(path: Union[str, Path], device: str = 'cpu') -> JambaThreatModel:
     model.load_state_dict(state_dict['model'])
     return model
 
+
 def save_model(model: JambaThreatModel, path: Union[str, Path]) -> None:
     """Save a model to disk."""
     path = Path(path)
@@ -135,6 +139,7 @@ def save_model(model: JambaThreatModel, path: Union[str, Path]) -> None:
         'config': model.config.__dict__
     }
     torch.save(state_dict, path)
+
 
 class ThreatDataset(Dataset):
     """Dataset for loading threat detection data"""
@@ -186,39 +191,4 @@ class ThreatDataset(Dataset):
         return len(self.features)
     
     def __getitem__(self, idx):
-        return self.features[idx], self.targets[idx]
-
-# For testing the model directly
-if __name__ == "__main__":
-    logger.info("Testing JambaThreatModel...")
-    # Create a sample input tensor
-    batch_size = 4
-    input_dim = 28  # Match expected dimension for dataset features
-    sample_input = torch.randn(batch_size, input_dim)
-    
-    # Initialize the model
-    model = JambaThreatModel(input_dim)
-    
-    # Set eval mode for consistent output
-    model.eval()
-    
-    # Test serialization
-    buffer = io.BytesIO()
-    torch.save(model.state_dict(), buffer)
-    buffer.seek(0)
-    
-    # Load the model in a new instance
-    model2 = JambaThreatModel(input_dim)
-    model2.load_state_dict(torch.load(buffer))
-    model2.eval()
-    
-    # Compare outputs
-    with torch.no_grad():
-        output1 = model(sample_input)
-        output2 = model2(sample_input)
-    
-    # Verify outputs match
-    match = torch.allclose(output1, output2)
-    logger.info(f"Serialization test {'passed' if match else 'failed'}")
-    logger.info(f"Model output shape: {output1.shape}")
-    logger.info("Model test completed successfully") 
+        return self.features[idx], self.targets[idx] 

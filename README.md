@@ -1,570 +1,511 @@
-# Jamba Threat Detection
+# Jamba Threat Detection Model
 
-A machine learning system for detecting threats in cybersecurity intelligence feeds using the Jamba language model.
+A deep learning-based threat detection system using advanced neural network architectures and robust data processing pipelines.
 
 ## Overview
 
-This project fine-tunes AI21's Jamba model (or alternative models like DistilBERT) to classify cyber threat intelligence data. The system processes structured data from threat feeds, converts it into a format suitable for language models, and trains a classifier to identify genuine threats.
+The Jamba Threat Detection Model is designed to identify security threats using a combination of system metrics and network behavior patterns. The system employs a sophisticated neural network architecture with self-attention mechanisms and provides comprehensive tooling for training, evaluation, and deployment.
+
+## Project Structure
+
+### Core Components
+
+#### Model and Training (`src/jamba/`)
+- **`jamba_model.py`**
+  - Purpose: Defines the core threat detection model architecture
+  - Dependencies: `torch`, `numpy`, `logging`
+  - Key features: Multi-head attention, feature processing layers, classification head
+
+- **`model_config.py`**
+  - Purpose: Manages model configuration and parameter validation
+  - Dependencies: `dataclasses`, `typing`
+  - Key features: Configuration validation, version compatibility checks
+
+- **`train.py`**
+  - Purpose: Main training script with command-line interface
+  - Dependencies: `torch`, `argparse`, `pandas`
+  - Features: Training loop, early stopping, checkpointing
+
+### Data Processing
+
+- **`data_preprocessing.py`**
+  - Purpose: Data preprocessing and feature engineering
+  - Dependencies: `pandas`, `numpy`, `sklearn.preprocessing`
+  - Features: 
+    - StandardScaler for numerical features
+    - LabelEncoder for categorical features
+    - Missing value handling
+    - Data validation
+
+### Utilities (`src/jamba/utils/`)
+
+- **`dataset_generator.py`**
+  - Purpose: Generates balanced datasets for training
+  - Dependencies: `numpy`, `pandas`
+  - Features: 
+    - Configurable dataset size
+    - Balanced class distribution
+    - Feature engineering
+
+- **`training_tracker.py`**
+  - Purpose: Tracks and visualizes training progress
+  - Dependencies: `pandas`, `matplotlib`, `seaborn`
+  - Features:
+    - Training metrics logging
+    - Performance visualization
+    - Parameter impact analysis
+
+- **`runpod_utils.py`**
+  - Purpose: RunPod integration utilities
+  - Dependencies: `subprocess`, `sys`, `os`
+  - Features:
+    - RunPod installation
+    - Environment setup
+    - Path management
+
+### Analysis Tools (`src/jamba/analysis/`)
+
+- **`analyze_codebase.py`**
+  - Purpose: Analyzes code complexity metrics
+  - Dependencies: `os`, `json`
+  - Features:
+    - Code complexity analysis
+    - Metrics generation
+    - Report creation
+
+- **`code_complexity.py`**
+  - Purpose: Calculates code complexity metrics
+  - Dependencies: `ast`, `typing`
+  - Features:
+    - Halstead metrics
+    - Cyclomatic complexity
+    - Code analysis utilities
+
+- **`fault_tree.py`**
+  - Purpose: Implements fault tree analysis
+  - Dependencies: `networkx`, `pandas`
+  - Features:
+    - Fault tree construction
+    - Risk analysis
+    - Report generation
+
+### Experiments
+
+- **`run_experiments.py`**
+  - Purpose: Runs training experiments with different configurations
+  - Dependencies: `torch`, `pandas`, `logging`
+  - Features:
+    - Multiple configuration testing
+    - Performance comparison
+    - Results logging
+
+### Command Line Interface
+
+- **`cli.py`**
+  - Purpose: Command-line interface for the system
+  - Dependencies: `argparse`
+  - Features:
+    - Training command
+    - Model evaluation
+    - Configuration management
+
+## Dependencies
+
+### Core Dependencies
+- Python 3.8+
+- PyTorch >= 1.9.0
+- NumPy >= 1.19.0
+- Pandas >= 1.3.0
+- Scikit-learn >= 0.24.0
+
+### Cloud and Storage Dependencies
+- Azure Storage Blob >= 12.0.0
+- Requests >= 2.26.0
+- RunPod >= 0.10.0 (for cloud training)
+
+### Visualization Dependencies
+- Matplotlib >= 3.4.0
+- Seaborn >= 0.11.0
+
+### Analysis Dependencies
+- NetworkX >= 2.6.0 (for fault tree analysis)
+- AST (built-in, for code analysis)
+
+### Development Dependencies
+- Black (code formatting)
+- Pytest (testing)
+- Mypy (type checking)
+- Jupyter (notebooks and visualization)
+
+### Optional Dependencies
+- CUDA >= 11.0 (for GPU acceleration)
+- TensorBoard >= 2.6.0 (for training visualization)
+- Ray >= 1.0.0 (for distributed training)
 
 ## Features
 
-- Preprocessing of threat intelligence data
-- Fine-tuning of state-of-the-art language models
-- Memory-optimized training for large models
-- GPU acceleration with advanced features like mixed precision and 8-bit quantization
-- RunPod GPU training integration for scalable, cost-effective training
-- Comprehensive logging and evaluation
+### 1. Model Architecture
+- Multi-head self-attention mechanism for capturing complex feature interactions
+- Progressive dimension reduction through feature processing layers
+- Batch normalization and adaptive dropout for training stability
+- SiLU (Swish) activation functions for improved gradient flow
+- Configurable architecture parameters (hidden dimensions, number of heads, layers)
 
-## Requirements
+### 2. Dataset Generation
+The system includes a sophisticated dataset generator that creates balanced, realistic threat detection datasets:
 
-- Python 3.8+
-- PyTorch 2.0+
-- Transformers 4.30+
-- CUDA-compatible GPU (recommended for large models)
-- Hugging Face account with access token (for gated models like Jamba)
-- RunPod account with API key (for GPU cloud training)
+- **Balanced Class Distribution**: Configurable threat ratio (default 50-50 split)
+- **Feature Engineering**:
+  - Temporal correlation through exponential moving averages
+  - Controlled noise injection for robustness
+  - Distinct patterns for normal and threat samples
+  - Automatic feature scaling and normalization
+- **Data Characteristics**:
+  - Configurable dataset size (default 35,000 samples)
+  - 20 engineered features with meaningful patterns
+  - Automatic train/validation/test splitting (70/15/15)
+
+### 3. Training Pipeline
+- **Experiment Tracking**:
+  - Comprehensive logging of training metrics
+  - Visualization of learning curves
+  - Parameter impact analysis
+  - Automated early stopping
+  
+- **Training Features**:
+  - Mixed precision training support
+  - Configurable batch sizes and learning rates
+  - Multi-head attention optimization
+  - Progressive learning rate scheduling
+
+### 4. Performance Monitoring
+The system includes a sophisticated training tracker that provides:
+- Real-time visualization of training progress
+- Comparative analysis of different model configurations
+- Parameter impact assessment
+- Best model selection based on multiple metrics
+
+## Model Configurations
+
+### Default Configuration
+```python
+{
+    'version': '1.0.0',
+    'input_dim': 20,
+    'hidden_dim': 64,
+    'output_dim': 1,
+    'dropout_rate': 0.3,
+    'n_heads': 4,
+    'feature_layers': 2,
+    'batch_size': 32,
+    'learning_rate': 0.001,
+    'epochs': 30
+}
+```
+
+### Performance Metrics
+Based on extensive experiments with different configurations:
+- Validation Accuracy: 99.9%+ across configurations
+- Early convergence (typically within 15-25 epochs)
+- Robust performance across different batch sizes (32-256)
+- Stable training with various learning rates (0.0001-0.001)
+
+## Usage
+
+### 1. Dataset Generation
+```python
+from jamba.utils.dataset_generator import generate_balanced_dataset
+
+# Generate a balanced dataset
+X, y = generate_balanced_dataset(
+    n_samples=35000,
+    n_features=20,
+    threat_ratio=0.5,
+    random_state=42
+)
+```
+
+### 2. Training Experiments
+```python
+from jamba.utils.training_tracker import TrainingTracker
+from jamba.model import JambaThreatModel
+from jamba.config import ModelConfig
+
+# Initialize training tracker
+tracker = TrainingTracker(log_dir="experiments/training_logs")
+
+# Create and train model
+config = ModelConfig(
+    input_dim=20,
+    hidden_dim=64,
+    output_dim=1,
+    dropout_rate=0.3,
+    epochs=30
+)
+
+model = JambaThreatModel(config)
+metrics, history = train_model(model, train_loader, val_loader, config)
+
+# Log and visualize results
+tracker.log_run(config=config.__dict__, metrics=metrics, history=history)
+tracker.plot_run_comparison(metric='accuracy')
+tracker.plot_learning_curves(run_id)
+```
+
+### 3. Analysis and Visualization
+```python
+# Get parameter impact analysis
+impact_analysis = tracker.analyze_parameter_impact()
+
+# Get best performing configurations
+best_runs = tracker.get_best_runs(metric='accuracy', top_n=3)
+```
 
 ## Installation
 
-1. Clone this repository:
+1. Clone the repository:
 ```bash
 git clone https://github.com/yourusername/jamba-threat.git
 cd jamba-threat
 ```
 
-2. Install dependencies:
+2. Create a virtual environment:
+```bash
+python -m venv .venv
+source .venv/bin/activate  # On Windows: .venv\Scripts\activate
+```
+
+3. Install dependencies:
 ```bash
 pip install -r requirements.txt
 ```
 
-3. Set up your Hugging Face token (for accessing gated models):
+4. Install optional dependencies (if needed):
 ```bash
-export HF_TOKEN=your_token_here
-```
-or login via CLI:
-```bash
-huggingface-cli login
+pip install -r requirements-optional.txt
 ```
 
-## API Key Security
-
-The project uses several external APIs, including RunPod for deployment. Follow these best practices for API key security:
-
-1. **Never commit API keys to the repository**
-2. Use environment variables to store sensitive credentials:
-
-```bash
-# For RunPod API
-export RUNPOD_API_KEY=your_runpod_api_key
-
-# For Hugging Face
-export HF_TOKEN=your_huggingface_token_here
-```
-
-3. For local development, consider using a `.env` file (which is listed in `.gitignore`):
-
-```bash
-# Create a .env file
-echo "RUNPOD_API_KEY=your_key_here" > .env
-echo "HF_TOKEN=your_token_here" >> .env
-
-# Use with python-dotenv
-# In your code:
-# from dotenv import load_dotenv
-# load_dotenv()
-```
-
-4. For production deployments, use your platform's secure secret management:
-   - Docker: use environment variables or Docker secrets
-   - RunPod: use the "Environment Variables" section in the RunPod console
-   - Cloud: use services like AWS Secrets Manager, GCP Secret Manager, etc.
-
-## Running the Pipeline with GPU Acceleration
-
-The pipeline can now be run with GPU acceleration using RunPod. This allows for faster training, especially with the larger 15,000 entry dataset that is now generated by default.
-
-### Training with RunPod GPUs
-
-There are multiple ways to use RunPod GPUs for training:
-
-#### 1. Using the run_pipeline.py script
-
-```bash
-# Set your RunPod API key and endpoint ID
-export RUNPOD_API_KEY=your_runpod_api_key
-export RUNPOD_ENDPOINT_ID=your_endpoint_id
-
-# Run the pipeline with GPU acceleration
-./run_pipeline.py --runpod --epochs 50 --batch-size 256
-```
-
-You can also specify the API key and endpoint ID directly:
-
-```bash
-./run_pipeline.py --runpod --api-key your_runpod_api_key --endpoint-id your_endpoint_id
-```
-
-#### 2. Using the dedicated training script
-
-For more control over the training process, you can use the dedicated `run_training.py` script:
-
-```bash
-python src/run_training.py --data-path data/jamba_training_data.csv --output-model models/jamba_model.pth
-```
-
-With custom parameters:
-
-```bash
-python src/run_training.py \
-  --data-path data/jamba_training_data.csv \
-  --output-model models/jamba_model.pth \
-  --epochs 50 \
-  --learning-rate 0.0005 \
-  --batch-size 256
-```
-
-Using a configuration file:
-
-```bash
-python src/run_training.py \
-  --data-path data/jamba_training_data.csv \
-  --output-model models/jamba_model.pth \
-  --config-file training_config.json
-```
-
-### Pipeline Options
-
-The pipeline now supports the following options:
-
-| Option | Description |
-|--------|-------------|
-| `--entries` | Number of entries to generate (default: 15000) |
-| `--epochs` | Number of training epochs (default: 30) |
-| `--regenerate` | Regenerate data even if it already exists |
-| `--no-train` | Skip the training phase |
-| `--no-predict` | Skip the prediction phase |
-| `--runpod` | Use RunPod GPU for training |
-| `--api-key` | RunPod API key (or set RUNPOD_API_KEY env var) |
-| `--endpoint-id` | RunPod endpoint ID (or set RUNPOD_ENDPOINT_ID env var) |
-| `--batch-size` | Batch size for training (default: 128) |
-
-### Examples
-
-Generate data only:
-```bash
-./run_pipeline.py --no-train --no-predict
-```
-
-Train with a smaller dataset:
-```bash
-./run_pipeline.py --entries 5000
-```
-
-Train with GPU and more epochs:
-```bash
-./run_pipeline.py --runpod --epochs 100 --batch-size 512
-```
-
-## RunPod Training Details
-
-The system now includes built-in support for training models using RunPod's serverless GPU infrastructure, which provides scalable and cost-effective access to high-performance GPUs.
-
-### How RunPod Training Works
-
-1. **Data Preparation**: Your local training data is processed and prepared for submission
-2. **Chunked Data Transfer**: For large datasets, the system automatically splits the data into chunks to comply with RunPod's 10MiB request size limit
-3. **Training Execution**: The data is sent to your RunPod endpoint where the training occurs on GPU hardware
-4. **Status Monitoring**: The training progress is monitored with periodic status checks
-5. **Model Retrieval**: Upon completion, the trained model and metrics are retrieved and saved locally
-
-### RunPod Training Components
-
-The RunPod training system consists of several key components:
-
-- **`src/train_runpod.py`**: Core class (`RunPodTrainer`) that handles the end-to-end training process
-- **`src/run_training.py`**: User-friendly command-line interface for RunPod training
-- **`src/handler.py`**: Contains the `train_model` function that executes on the RunPod server
-- **`src/runpod_entry.sh`**: Container entry script for RunPod serverless deployment
-
-### Using the RunPodTrainer API
-
-For programmatic access, you can use the `RunPodTrainer` class directly in your code:
-
-```python
-from src.train_runpod import RunPodTrainer
-import pandas as pd
-
-# Initialize the trainer
-trainer = RunPodTrainer(api_key="your_api_key", endpoint_id="your_endpoint_id")
-
-# Prepare the data
-data = trainer.prepare_data("path/to/data.csv")
-
-# Define training parameters
-params = {
-    "epochs": 30,
-    "learning_rate": 0.001,
-    "batch_size": 128
-}
-
-# Submit the training job
-job_result = trainer.submit_training_job(data, params)
-job_id = job_result["id"]
-
-# Wait for the job to complete and get results
-result = trainer.wait_for_completion(job_id)
-
-# Save the model
-trainer.save_model(result, "models/jamba_model.pth")
-```
-
-### Training Configuration Options
-
-When using RunPod training, you can customize the following parameters:
-
-- **epochs**: Number of training epochs (default: 30)
-- **learning_rate**: Learning rate for optimization (default: 0.001)
-- **batch_size**: Batch size for training (default: 128)
-- **target_column**: Column name containing the target labels (default: "is_threat")
-
-These can be specified via command-line arguments or in a JSON configuration file.
-
-## Deployment on RunPod.io
-
-RunPod.io provides a range of GPU options that are ideal for training large language models like Jamba.
-
-### 1. Selecting a RunPod GPU
-
-RunPod offers various GPU configurations. For this project, we recommend:
-
-- **L4 (24GB)**: Good cost-effective option for smaller models
-- **A10G (24GB)**: Good balance of performance and cost
-- **A40 (48GB)** or **A5000 (24GB)**: Better for larger models with memory offloading
-- **A100 (40GB/80GB)**: Optimal for the full Jamba model with fast training
-- **H100 (80GB)**: Highest performance for large models (if budget allows)
-
-### 2. Starting a RunPod Instance
-
-1. Create an account on [RunPod.io](https://www.runpod.io/)
-2. Select "Deploy" and choose a GPU type from the available options
-3. Select a template (PyTorch or Tensorflow templates work well)
-4. Deploy your pod and connect via SSH or JupyterLab
-
-### 3. Automated Deployment
-
-We provide an automated deployment script for RunPod instances:
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/jamba-threat.git
-cd jamba-threat
-
-# Make the deployment script executable
-chmod +x deploy_runpod.sh
-
-# Run the deployment script
-./deploy_runpod.sh
-```
-
-The script will:
-- Auto-detect your RunPod GPU type
-- Install appropriate CUDA optimizations
-- Configure the environment for best performance
-- Install all required dependencies
-- Configure Hugging Face authentication
-- Provide recommended training commands for your specific GPU
-
-### 4. Running Training on RunPod
-
-Our deployment script will automatically suggest the optimal configuration for your specific GPU. Here are some examples:
-
-#### For RunPod A100 (40/80GB):
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model ai21labs/AI21-Jamba-1.5-Mini \
-  --batch-size 24 \
-  --bf16 \
-  --log-memory
-```
-
-#### For RunPod H100:
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model ai21labs/AI21-Jamba-1.5-Mini \
-  --batch-size 32 \
-  --bf16 \
-  --log-memory
-```
-
-#### For RunPod L4:
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model distilbert-base-uncased \
-  --batch-size 64 \
-  --fp16 \
-  --log-memory
-```
-
-#### For Jamba on RunPod L4:
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model ai21labs/AI21-Jamba-1.5-Mini \
-  --batch-size 8 \
-  --gradient-accumulation-steps 4 \
-  --fp16 \
-  --log-memory
-```
-
-### 5. RunPod-Specific Optimizations
-
-- **Shared Memory**: The deployment script increases shared memory allocation for better dataloader performance
-- **Flash Attention**: Automatically installs flash-attention for compatible GPUs
-- **CUDA Version Detection**: Optimizes Triton installation based on your specific CUDA version
-- **TensorBoard Access**: Use the `--bind_all` flag with TensorBoard to access through RunPod's port forwarding
-
-### 6. Saving Your Work on RunPod
-
-RunPod instances are ephemeral. To persist your work:
-
-1. Save your trained models to the `/workspace` directory (which is persistent)
-2. Or use RunPod's volume feature to attach persistent storage
-3. Push your trained models to Hugging Face Hub:
-```bash
-# Push your model to Hugging Face Hub
-python src/push_to_hub.py --model-path models/jamba-threat/jamba-threat-final-TIMESTAMP --repo-name your-username/jamba-threat
-```
-
-## Deployment on Hetzner GPU Servers
-
-### 1. Selecting a Hetzner GPU Server
-
-Hetzner offers several GPU server configurations. For this project, we recommend:
-
-- **CCX13** (RTX A4000): Good balance of cost and performance
-- **CCX33** (RTX A5000): Better for larger models with memory offloading
-- **CCX63** (RTX A6000): Recommended for the full Jamba model without compromises
-
-### 2. Server Setup
-
-After provisioning your Hetzner server, connect via SSH and set up the environment:
-
-```bash
-# Update the system
-sudo apt update && sudo apt upgrade -y
-
-# Install required packages
-sudo apt install -y python3-pip python3-venv git nvidia-driver-535 nvidia-utils-535
-
-# Verify NVIDIA installation
-nvidia-smi
-```
-
-### 3. Automated Deployment
-
-We provide an automated deployment script for Hetzner GPU servers:
-
-```bash
-# Clone the repository
-git clone https://github.com/yourusername/jamba-threat.git
-cd jamba-threat
-
-# Make the deployment script executable
-chmod +x deploy_hetzner.sh
-
-# Run the deployment script
-./deploy_hetzner.sh
-```
-
-The script will:
-- Verify your system has GPU drivers
-- Set up a Python virtual environment
-- Install all required dependencies
-- Configure Hugging Face authentication
-- Create necessary directories
-- Provide example commands for training
-
-### 4. Running the Training
-
-The script provides examples, but here are the recommended configurations for different Hetzner GPU models:
-
-#### For RTX A4000 (16GB VRAM):
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model distilbert-base-uncased \
-  --batch-size 32 \
-  --fp16 \
-  --log-memory
-```
-
-#### For RTX A5000 (24GB VRAM):
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model ai21labs/AI21-Jamba-1.5-Mini \
-  --batch-size 8 \
-  --gradient-accumulation-steps 4 \
-  --fp16 \
-  --log-memory
-```
-
-#### For RTX A6000 (48GB VRAM):
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model ai21labs/AI21-Jamba-1.5-Mini \
-  --batch-size 16 \
-  --fp16 \
-  --log-memory
-```
-
-#### For A100 (80GB VRAM):
-```bash
-python src/train_jamba.py \
-  --data data/threat_intel_feed.csv \
-  --model ai21labs/AI21-Jamba-1.5-Mini \
-  --batch-size 24 \
-  --bf16 \
-  --log-memory
-```
-
-### 5. Memory Optimization Techniques
-
-The system supports several memory optimization techniques:
-
-- **FP16 Precision** (`--fp16`): Uses half-precision floating point to reduce memory usage
-- **BF16 Precision** (`--bf16`): Better for newer GPUs like A100
-- **Gradient Accumulation** (`--gradient-accumulation-steps`): Simulates larger batch sizes
-- **8-bit Quantization** (`--use-8bit`): Further reduces memory usage for very large models
-- **CPU Offloading** (`--offload-to-cpu`): Moves some model layers to CPU
-- **Smaller Model Fallback** (`--smaller-model-fallback`): Automatically switches to a smaller model if needed
-
-### 6. Monitoring Training
-
-You can monitor the training process with TensorBoard:
-
-```bash
-# In another terminal
-pip install tensorboard
-tensorboard --logdir models/jamba-threat/logs
-```
-
-Then access TensorBoard in your browser at `http://your-server-ip:6006`
-
-## Using Your Trained Model
-
-After training, your model will be saved in the `models/jamba-threat` directory. You can use it for inference with:
-
-```python
-from transformers import AutoModelForSequenceClassification, AutoTokenizer
-
-model_path = "models/jamba-threat/jamba-threat-final-TIMESTAMP"
-tokenizer = AutoTokenizer.from_pretrained(model_path)
-model = AutoModelForSequenceClassification.from_pretrained(model_path)
-
-# Example text to classify
-text = "Source: ThreatPost | Threat Type: Malware | Actor: APT29 | Confidence Score: 0.95 | Description: New variant of CobaltStrike observed in the wild"
-
-inputs = tokenizer(text, return_tensors="pt")
-outputs = model(**inputs)
-prediction = outputs.logits.argmax(-1).item()
-print(f"Prediction: {'Threat' if prediction == 1 else 'Benign'}")
-```
-
-## Troubleshooting
-
-### Common Issues on RunPod
-
-1. **Shared Memory Errors**: Try running with fewer dataloader workers:
-```bash
-python src/train_jamba.py --dataloader-num-workers 1
-```
-
-2. **Flash Attention Installation Issues**: If flash-attention installation fails, try without it:
-```bash
-python src/train_jamba.py --use-flash-attn false
-```
-
-3. **Port Forwarding**: Access TensorBoard by setting up port forwarding in the RunPod dashboard or use the public URL feature.
-
-4. **Model Size Errors**: For very large models on smaller GPUs, try:
-```bash
-python src/train_jamba.py --batch-size 1 --gradient-accumulation-steps 32 --use-8bit --offload-to-cpu
-```
-
-5. **Persistent Storage**: If your pod restarts, mount a persistent volume to `/workspace` to keep your models.
-
-### Common Issues on Hetzner
-
-1. **CUDA Out of Memory**: Reduce batch size or enable memory optimizations:
-```bash
-python src/train_jamba.py --batch-size 4 --gradient-accumulation-steps 8 --fp16 --offload-to-cpu
-```
-
-2. **Model Too Large**: Try using 8-bit quantization:
-```bash
-python src/train_jamba.py --use-8bit --offload-to-cpu
-```
-
-3. **Hugging Face Authentication**: Make sure your token has access to gated models:
-```bash
-huggingface-cli whoami
-```
-
-4. **Slow Training**: Enable more workers for dataloading:
-```bash
-python src/train_jamba.py --dataloader-num-workers 4
-```
-
-## Troubleshooting RunPod Training
-
-If you encounter issues with RunPod training, here are some specific troubleshooting steps:
-
-### Size Limitations
-
-RunPod has a 10MiB request size limit. The system automatically handles this by:
-- Compressing data when possible
-- Splitting large datasets into chunks
-- Using temporary storage for very large datasets
-
-If you still encounter size issues, try:
-- Reducing the dataset size
-- Using a more aggressive sampling approach
-- Pre-uploading the data to a location accessible by the RunPod endpoint
-
-### Authentication Issues
-
-If you encounter authentication issues:
-- Verify your API key is correct and has not expired
-- Check that your endpoint ID is correct
-- Ensure your RunPod account has sufficient credits
-
-### Training Failures
-
-If training fails on RunPod:
-- Check the logs for error messages
-- Verify your data format is correct
-- Try with a smaller batch size (e.g., `--batch-size 32`)
-- Check if your endpoint has sufficient GPU memory
-
-### Connection Timeouts
-
-For long-running training jobs:
-- Increase the timeout using the built-in parameter (`--timeout 7200` for 2 hours)
-- Break your training into smaller epochs
-- Use the status checking utility: `python src/runpod_health_check.py`
+## Contributing
+
+1. Fork the repository
+2. Create your feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
 
 ## License
 
 This project is licensed under the MIT License - see the LICENSE file for details.
 
-## Acknowledgments
+## Testing
 
-- AI21 Labs for the Jamba model
-- Hugging Face for the Transformers library
-- RunPod for the serverless GPU infrastructure
-- The open-source community for tools and libraries 
+### Test Suite Structure
+
+#### Unit Tests (`src/jamba/tests/`)
+- **`test_regression.py`**
+  - Tests model training and prediction
+  - Validates loss calculation
+  - Checks gradient flow
+  - Verifies model checkpointing
+
+- **`test_fault_tree.py`**
+  - Tests fault tree construction
+  - Validates risk calculations
+  - Checks report generation
+  - Verifies tree traversal
+
+#### Integration Tests
+- **`test_gpu.py`**
+  - Validates GPU compatibility
+  - Tests CUDA operations
+  - Checks memory management
+  - Verifies mixed precision training
+
+- **`runpod_startup.py`**
+  - Tests RunPod environment setup
+  - Validates model imports
+  - Checks CUDA availability
+  - Tests model initialization
+
+### Running Tests
+
+1. Run all tests:
+```bash
+python -m pytest src/jamba/tests/
+```
+
+2. Run specific test files:
+```bash
+python -m pytest src/jamba/tests/test_regression.py
+python -m pytest src/jamba/tests/test_fault_tree.py
+```
+
+3. Run GPU tests:
+```bash
+python src/test_gpu.py
+```
+
+4. Run RunPod environment tests:
+```bash
+python src/runpod_startup.py --check-environment
+```
+
+### Test Coverage
+
+To generate a test coverage report:
+```bash
+coverage run -m pytest src/jamba/tests/
+coverage report
+coverage html  # Generates HTML report
+```
+
+### Continuous Integration
+
+The project uses GitHub Actions for CI/CD:
+- Runs test suite on each push
+- Validates code formatting
+- Checks type hints
+- Generates coverage reports
+
+## Data Structure
+
+### Directory Layout
+```
+jamba-threat/
+├── data/
+│   ├── raw/                 # Raw input data
+│   ├── processed/           # Preprocessed datasets
+│   ├── balanced/           # Balanced datasets
+│   └── experiments/        # Experimental results
+├── models/                 # Saved model checkpoints
+├── logs/                  # Training and error logs
+└── experiments/
+    ├── training_logs/     # Experiment tracking
+    ├── metrics/          # Performance metrics
+    └── plots/            # Visualization plots
+```
+
+### Data Formats
+
+#### Input Data
+- **Raw Data Format**: CSV or Parquet files with the following structure:
+```python
+  {
+      'timestamp': datetime64[ns],
+      'feature_1': float64,
+      'feature_2': float64,
+      ...,
+      'feature_n': float64,
+      'is_threat': int32  # Target variable (0 or 1)
+  }
+  ```
+
+#### Processed Data
+- **Training Data**: Preprocessed and scaled features
+- **Validation Data**: Held-out data for model validation
+- **Test Data**: Separate data for final evaluation
+- File Format: `.pt` (PyTorch tensors) or `.npz` (NumPy arrays)
+
+#### Model Checkpoints
+- Format: `.pt` files containing:
+  ```python
+  {
+      'epoch': int,
+      'model_state': dict,
+      'optimizer_state': dict,
+      'scheduler_state': dict,
+      'config': dict,
+      'metrics': dict
+  }
+  ```
+
+#### Experiment Logs
+- **Training Logs**: CSV files with metrics per epoch
+- **Configuration**: JSON files with experiment parameters
+- **Visualizations**: PNG/PDF files with performance plots
+
+### Data Processing Pipeline
+
+1. **Raw Data**
+   - Load from CSV/Parquet
+   - Validate schema
+   - Check for missing values
+
+2. **Preprocessing**
+   - Scale numerical features
+   - Encode categorical variables
+   - Handle missing data
+   - Apply feature engineering
+
+3. **Dataset Creation**
+   - Generate balanced datasets
+   - Split into train/val/test
+   - Create PyTorch datasets
+   - Apply data augmentation
+
+4. **Experiment Tracking**
+   - Log training metrics
+   - Save model checkpoints
+   - Generate visualizations
+   - Track parameter impacts 
+
+## GGUF Model Support
+
+The Jamba Threat Detection Model now supports conversion to GGUF format for efficient deployment and inference. GGUF (GPT-Generated Unified Format) provides several advantages:
+
+- Reduced model size through quantization
+- Faster inference speed
+- Lower memory usage
+- Better compatibility with deployment platforms
+
+### Converting Models to GGUF
+
+To convert a trained PyTorch model to GGUF format, use the provided conversion script:
+
+```bash
+python -m src.jamba.scripts.convert_model \
+    --input-model /path/to/model.pt \
+    --model-name my_model \
+    --quantization q4_k_m
+```
+
+Available quantization options:
+
+- `q4_k_m`: 4-bit quantization with K-means clustering (highest compression)
+- `q5_k_m`: 5-bit quantization with K-means clustering (balanced)
+- `q8_0`: 8-bit linear quantization (highest quality)
+
+To view detailed information about quantization types:
+
+```bash
+python -m src.jamba.scripts.convert_model --show-info
+```
+
+### Using GGUF Models
+
+GGUF models can be loaded and used for inference using the `ModelConverter` class:
+
+```python
+from jamba.utils.model_converter import ModelConverter
+
+converter = ModelConverter()
+model = converter.load_gguf_model("/path/to/model.gguf")
+predictions = model(input_data)
+```
+
+### Directory Structure
+
+GGUF models are stored in the following directory structure:
+
+```
+models/
+├── gguf/
+│   ├── q4_k_m/
+│   │   └── model_name.gguf
+│   ├── q5_k_m/
+│   │   └── model_name.gguf
+│   └── q8_0/
+│       └── model_name.gguf
+└── pytorch/
+    └── model_name.pt
+``` 

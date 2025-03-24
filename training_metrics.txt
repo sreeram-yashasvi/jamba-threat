@@ -1,0 +1,27 @@
+
+Dataset Size: 45000
+accuracy: 0.9997777777777778
+f1: 0.9997778271495222
+final_train_loss: 0.0005085466014357751
+final_val_loss: 0.00060556789302796
+best_val_loss: 0.0004944558924365369
+epochs_trained: 17
+training_time: 14.101261138916016
+
+Dataset Size: 70000
+accuracy: 1.0
+f1: 1.0
+final_train_loss: 0.00012828455990950772
+final_val_loss: 7.487029467951424e-05
+best_val_loss: 3.4496755994450394e-05
+epochs_trained: 14
+training_time: 16.04785704612732
+
+Dataset Size: 90000
+accuracy: 0.9997777777777778
+f1: 0.9997778271495222
+final_train_loss: 3.726546718681472e-05
+final_val_loss: 0.0005083259191126525
+best_val_loss: 0.0003139302090069747
+epochs_trained: 12
+training_time: 17.273712396621704

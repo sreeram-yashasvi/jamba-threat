@@ -3,24 +3,60 @@ import dataclasses
 from typing import Optional, Dict, Any
 import json
 import os
+from dataclasses import dataclass, asdict
 
-@dataclasses.dataclass
+# Version compatibility mapping
+VERSION_COMPATIBILITY = {
+    '1.0.0': {
+        'min_input_dim': 1,
+        'max_input_dim': 1024,
+        'min_hidden_dim': 16,
+        'max_hidden_dim': 512,
+        'min_output_dim': 1,
+        'max_output_dim': 100
+    }
+}
+
+@dataclass
 class ModelConfig:
-    """Configuration for Jamba Threat Model"""
-    version: str = "1.0.0"
-    input_dim: int = 512
-    hidden_dim: Optional[int] = None
-    output_dim: int = 2
-    dropout_rate: float = 0.3
-    n_heads: Optional[int] = None
-    feature_layers: Optional[int] = None
-    use_mixed_precision: bool = True
-    batch_size: int = 128
-    learning_rate: float = 0.001
+    """Configuration for the Jamba Threat Detection model."""
     
-    def to_dict(self) -> Dict[str, Any]:
-        """Convert config to dictionary"""
-        return dataclasses.asdict(self)
+    version: str = "1.0.0"
+    input_dim: int = 9  # Updated to match latest checkpoint
+    hidden_dim: int = 128
+    output_dim: int = 1
+    dropout_rate: float = 0.3
+    n_heads: int = 4
+    feature_layers: int = 3
+    use_mixed_precision: bool = False
+    batch_size: int = 64
+    learning_rate: float = 0.001
+    device: str = "cpu"
+    epochs: int = 20
+    
+    def __post_init__(self):
+        if self.version not in VERSION_COMPATIBILITY:
+            raise ValueError(f"Unsupported model version: {self.version}")
+        
+        # Validate dimensions if provided
+        compat = VERSION_COMPATIBILITY[self.version]
+        
+        if self.input_dim is not None:
+            if not (compat['min_input_dim'] <= self.input_dim <= compat['max_input_dim']):
+                raise ValueError(f"input_dim must be between {compat['min_input_dim']} and {compat['max_input_dim']}")
+        
+        if not (compat['min_hidden_dim'] <= self.hidden_dim <= compat['max_hidden_dim']):
+            raise ValueError(f"hidden_dim must be between {compat['min_hidden_dim']} and {compat['max_hidden_dim']}")
+        
+        if not (compat['min_output_dim'] <= self.output_dim <= compat['max_output_dim']):
+            raise ValueError(f"output_dim must be between {compat['min_output_dim']} and {compat['max_output_dim']}")
+        
+        if not (0 <= self.dropout_rate <= 1):
+            raise ValueError("dropout_rate must be between 0 and 1")
+    
+    def to_dict(self):
+        """Convert config to dictionary."""
+        return asdict(self)
     
     @classmethod
     def from_dict(cls, config_dict: Dict[str, Any]) -> 'ModelConfig':
@@ -44,7 +80,6 @@ class ModelConfig:
 
 # Default configurations for different scenarios
 DEFAULT_CPU_CONFIG = ModelConfig(
-    version="1.0.0",
     input_dim=512,
     hidden_dim=256,
     output_dim=2,
@@ -56,7 +91,6 @@ DEFAULT_CPU_CONFIG = ModelConfig(
 )
 
 DEFAULT_GPU_CONFIG = ModelConfig(
-    version="1.0.0",
     input_dim=512,
     hidden_dim=512,
     output_dim=2,
@@ -65,10 +99,4 @@ DEFAULT_GPU_CONFIG = ModelConfig(
     feature_layers=4,
     use_mixed_precision=True,
     batch_size=128
-)
-
-# Version compatibility mapping
-VERSION_COMPATIBILITY = {
-    "1.0.0": ["1.0.0"],  # Compatible with itself
-    "0.9.0": ["0.9.0", "1.0.0"],  # Old version compatible with new
-} 
+) 
