@@ -21,11 +21,11 @@ wheels/
 *.egg
 
 # Virtual Environment
-venv/
+.env
+.venv
 env/
+venv/
 ENV/
-.venv/
-virtualenv/
 
 # IDE
 .idea/
@@ -34,23 +34,14 @@ virtualenv/
 *.swo
 
 # Project specific
-data/
-models/
-logs/
-runs/
-outputs/
-*.csv
-*.pth
-*.pt
-*.pkl
-*.onnx
-*.png
-*.jpg
-*.jpeg
-*.log
+analysis/
+checkpoints/
+pretrained/
+wandb/
 
-# Jupyter Notebook
-.ipynb_checkpoints
+# Logs
+*.log
+logs/
 
 # OS specific
 .DS_Store

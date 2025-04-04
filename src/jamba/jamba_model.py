@@ -55,56 +55,75 @@ class JambaThreatModel(nn.Module):
     """Neural network model for threat detection."""
     
     def __init__(self, config):
-        super().__init__()
+        """
+        Initialize the model.
         
+        Args:
+            config: ModelConfig instance containing model parameters
+        """
+        super().__init__()
         self.config = config
         
-        logger.info(f"Initializing JambaThreatModel v{config.version}")
-        logger.info(f"Config: {config.to_dict()}")
+        # Feature extraction layers
+        layers = []
+        current_dim = config.input_dim
         
-        # Feature extractor
-        self.feature_extractor = nn.Sequential(
-            nn.Linear(config.input_dim, config.hidden_dim),
-            nn.ReLU(),
-            nn.Dropout(config.dropout_rate)
-        )
-        
-        # Feature processing layers
-        self.feature_processor = nn.ModuleList([
-            nn.Sequential(
-                nn.Linear(config.hidden_dim, config.hidden_dim),
+        for i in range(config.feature_layers):
+            next_dim = config.hidden_dim
+            layers.extend([
+                nn.Linear(current_dim, next_dim),
+                nn.LayerNorm(next_dim),
                 nn.ReLU(),
                 nn.Dropout(config.dropout_rate)
-            )
-            for _ in range(config.feature_layers)
-        ])
+            ])
+            current_dim = next_dim
         
-        # Output classifier
-        self.classifier = nn.Linear(config.hidden_dim, config.output_dim)
+        self.feature_extractor = nn.Sequential(*layers)
+        
+        # Multi-head self-attention
+        self.attention = nn.MultiheadAttention(
+            embed_dim=config.hidden_dim,
+            num_heads=config.n_heads,
+            dropout=config.dropout_rate,
+            batch_first=True
+        )
+        
+        # Output layers
+        self.classifier = nn.Sequential(
+            nn.Linear(config.hidden_dim, config.hidden_dim // 2),
+            nn.ReLU(),
+            nn.Dropout(config.dropout_rate),
+            nn.Linear(config.hidden_dim // 2, config.output_dim)
+        )
+        
+        logger.info(f"Initialized {self.__class__.__name__} with config: {config}")
     
     def forward(self, x):
-        """Forward pass through the model."""
-        try:
-            # Feature extraction
-            x = self.feature_extractor(x)
+        """
+        Forward pass through the model.
+        
+        Args:
+            x: Input tensor of shape (batch_size, input_dim)
             
-            # Process through feature layers
-            for layer in self.feature_processor:
-                x = layer(x)
-            
-            # Output layer (no sigmoid - will use BCEWithLogitsLoss)
-            x = self.classifier(x)
-            
-            return x
-            
-        except Exception as e:
-            logger.error(f"Error in forward pass: {str(e)}")
-            raise
-    
-    def get_embedding(self, x: torch.Tensor) -> torch.Tensor:
-        """Extract feature embeddings from input data."""
-        with torch.no_grad():
-            return self.feature_extractor(x)
+        Returns:
+            Tensor of shape (batch_size, output_dim)
+        """
+        # Extract features
+        features = self.feature_extractor(x)
+        
+        # Reshape for attention (batch_size, sequence_length=1, hidden_dim)
+        features = features.unsqueeze(1)
+        
+        # Apply self-attention
+        attended_features, _ = self.attention(features, features, features)
+        
+        # Reshape back
+        attended_features = attended_features.squeeze(1)
+        
+        # Classification
+        output = self.classifier(attended_features)
+        
+        return output
 
 def create_model(config: Optional[Dict[str, Any]] = None) -> JambaThreatModel:
     """Create a new instance of the model with optional config override."""

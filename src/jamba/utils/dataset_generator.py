@@ -4,6 +4,7 @@ from sklearn.preprocessing import StandardScaler
 from typing import Tuple, Optional, List
 import logging
 import os
+from pathlib import Path
 
 logger = logging.getLogger(__name__)
 
@@ -73,50 +74,39 @@ class DatasetGenerator:
         class_dist = pd.Series(y).value_counts(normalize=True)
         logger.info("Class distribution:\nthreat\n" + class_dist.to_string())
 
-def generate_balanced_dataset(n_normal, n_threat, n_features=20, random_state=42, output_dir=None):
-    """Generate a balanced dataset with specified number of normal and threat samples."""
-    logger.info(f"Generating dataset with {n_normal} normal samples and {n_threat} threat samples")
+def generate_balanced_dataset(n_normal_samples, n_threat_samples, n_features=20, random_state=42):
+    """
+    Generate a balanced synthetic dataset for threat detection.
     
-    # Initialize generator
-    generator = DatasetGenerator(n_features=n_features, random_state=random_state)
+    Args:
+        n_normal_samples (int): Number of normal (non-threat) samples
+        n_threat_samples (int): Number of threat samples
+        n_features (int): Number of features per sample
+        random_state (int): Random seed for reproducibility
+        
+    Returns:
+        tuple: (features, labels) as numpy arrays
+    """
+    np.random.seed(random_state)
     
-    # Generate data in chunks to handle memory efficiently
-    chunk_size = 10000
-    X_normal = []
-    X_threat = []
+    # Generate normal samples
+    normal_samples = np.random.randn(n_normal_samples, n_features)
+    normal_labels = np.zeros(n_normal_samples)
     
-    # Generate normal samples in chunks
-    for i in range(0, n_normal, chunk_size):
-        chunk_size_normal = min(chunk_size, n_normal - i)
-        X_normal.append(generator.generate_normal_traffic(chunk_size_normal))
+    # Generate threat samples with a different distribution
+    threat_samples = np.random.randn(n_threat_samples, n_features) * 1.5 + 0.5
+    threat_labels = np.ones(n_threat_samples)
     
-    # Generate threat samples in chunks
-    for i in range(0, n_threat, chunk_size):
-        chunk_size_threat = min(chunk_size, n_threat - i)
-        X_threat.append(generator.generate_threat_traffic(chunk_size_threat))
-    
-    # Combine chunks
-    X_normal = np.vstack(X_normal)
-    X_threat = np.vstack(X_threat)
-    
-    # Create labels
-    y_normal = np.zeros(n_normal)
-    y_threat = np.ones(n_threat)
-    
-    # Combine data and labels
-    X = np.vstack([X_normal, X_threat])
-    y = np.concatenate([y_normal, y_threat])
+    # Combine samples
+    X = np.vstack([normal_samples, threat_samples])
+    y = np.hstack([normal_labels, threat_labels])
     
     # Shuffle the dataset
-    indices = np.arange(len(X))
-    generator.rng.shuffle(indices)
-    X = X[indices]
-    y = y[indices]
+    shuffle_idx = np.random.permutation(len(X))
+    X = X[shuffle_idx]
+    y = y[shuffle_idx]
     
-    logger.info("Dataset generation completed")
-    
-    # Save dataset if output directory is provided
-    if output_dir:
-        generator.save_dataset(X, y, output_dir=output_dir)
+    logger.info(f"Generated balanced dataset with {len(X)} samples "
+               f"({n_normal_samples} normal, {n_threat_samples} threat)")
     
     return X, y 

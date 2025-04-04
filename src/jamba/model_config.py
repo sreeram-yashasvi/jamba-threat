@@ -4,6 +4,7 @@ from typing import Optional, Dict, Any
 import json
 import os
 from dataclasses import dataclass, asdict
+import torch
 
 # Version compatibility mapping
 VERSION_COMPATIBILITY = {
@@ -53,6 +54,9 @@ class ModelConfig:
         
         if not (0 <= self.dropout_rate <= 1):
             raise ValueError("dropout_rate must be between 0 and 1")
+        
+        # Convert device string to torch.device
+        self.device = torch.device(self.device)
     
     def to_dict(self):
         """Convert config to dictionary."""

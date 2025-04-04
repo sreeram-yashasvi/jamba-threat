@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+import sys
+from pathlib import Path
+import pandas as pd
+import torch
+import numpy as np
+from datetime import datetime
+import logging
+import wandb
+from sklearn.model_selection import train_test_split
+from torch.utils.data import Dataset
+
+# Add src directory to Python path
+src_path = str(Path(__file__).parent.parent.parent)
+if src_path not in sys.path:
+    sys.path.append(src_path)
+
+from jamba.jamba_model_transformer import JambaThreatTransformerModel, ThreatDataset
+from jamba.model_config import ModelConfig
+
+# Configure logging
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+def preprocess_incidents(csv_path):
+    """Preprocess the incidents queue data."""
+    # Read the CSV file
+    df = pd.read_csv(csv_path)
+    
+    # Extract relevant features
+    features = {
+        'severity_score': df['Severity'].map({'low': 0, 'medium': 1, 'high': 2, 'informational': -1}).fillna(0),
+        'is_initial_access': df['Categories'].str.contains('InitialAccess', na=False).astype(float),
+        'is_suspicious_activity': df['Categories'].str.contains('SuspiciousActivity', na=False).astype(float),
+        'active_alerts': pd.to_numeric(df['Active alerts'].fillna(0)),
+        'has_multiple_users': df['Impacted assets'].str.count(',').gt(1).astype(float),
+        'investigation_state_score': df['Investigation state'].map({
+            'Queued': 0,
+            'Unsupported alert type': 1,
+            '2 investigation states': 2
+        }).fillna(0),
+        'is_active': (df['Status'] == 'Active').astype(float),
+        'is_office365': (df['Service sources'] == 'Office 365').astype(float),
+        'is_endpoint': (df['Service sources'] == 'Endpoint').astype(float),
+        'is_mdo': (df['Detection sources'] == 'MDO').astype(float),
+        'is_custom_ti': df['Detection sources'].str.contains('Custom TI', na=False).astype(float),
+        'has_tags': (df['Tags'] != '-').astype(float),
+        'has_policy': df['Policy name'].notna().astype(float),
+        'has_classification': (df['Classification'] != 'Not set').astype(float),
+        'has_determination': (df['Determination'] != 'Not set').astype(float)
+    }
+    
+    # Convert to DataFrame
+    features_df = pd.DataFrame(features)
+    
+    # Create target variable (1 for high-risk incidents)
+    # High severity OR multiple investigation states OR multiple impacted users
+    y = ((df['Severity'] == 'high') | 
+         (df['Investigation state'] == '2 investigation states') |
+         (features['has_multiple_users'] > 0)).astype(float)
+    
+    # Normalize numerical features
+    numerical_cols = ['severity_score', 'active_alerts', 'investigation_state_score']
+    for col in numerical_cols:
+        features_df[col] = (features_df[col] - features_df[col].mean()) / (features_df[col].std() + 1e-8)
+    
+    # Fill any remaining NaN values with 0
+    features_df = features_df.fillna(0)
+    
+    # Ensure we have exactly 20 features (pad if necessary)
+    current_features = features_df.shape[1]
+    if current_features < 20:
+        for i in range(20 - current_features):
+            features_df[f'padding_{i}'] = 0.0
+    elif current_features > 20:
+        features_df = features_df.iloc[:, :20]
+    
+    return features_df.values.astype(np.float32), y.values.astype(np.float32)
+
+def train_model():
+    # Initialize wandb
+    wandb.init(
+        project="jamba-threat-detection",
+        config={
+            "learning_rate": 0.001,
+            "epochs": 50,
+            "batch_size": 16,
+            "hidden_dim": 128,
+            "n_heads": 4,
+            "feature_layers": 2,
+            "dropout_rate": 0.3
+        }
+    )
+    
+    # Load and preprocess data
+    logger.info("Loading and preprocessing incidents data...")
+    X, y = preprocess_incidents('incidents-queue-20250402.csv')
+    
+    # Split data into train, validation, and test sets
+    X_train, X_temp, y_train, y_temp = train_test_split(X, y, test_size=0.3, random_state=42)
+    X_val, X_test, y_val, y_test = train_test_split(X_temp, y_temp, test_size=0.5, random_state=42)
+    
+    # Create datasets
+    class IncidentDataset(Dataset):
+        def __init__(self, features, targets):
+            self.features = torch.tensor(features, dtype=torch.float32)
+            self.targets = torch.tensor(targets, dtype=torch.float32)
+        
+        def __len__(self):
+            return len(self.features)
+        
+        def __getitem__(self, idx):
+            return self.features[idx], self.targets[idx]
+    
+    # Create datasets
+    train_dataset = IncidentDataset(X_train, y_train)
+    val_dataset = IncidentDataset(X_val, y_val)
+    test_dataset = IncidentDataset(X_test, y_test)
+    
+    # Create data loaders
+    train_loader = torch.utils.data.DataLoader(
+        train_dataset,
+        batch_size=wandb.config.batch_size,
+        shuffle=True
+    )
+    val_loader = torch.utils.data.DataLoader(
+        val_dataset,
+        batch_size=wandb.config.batch_size,
+        shuffle=False
+    )
+    test_loader = torch.utils.data.DataLoader(
+        test_dataset,
+        batch_size=wandb.config.batch_size,
+        shuffle=False
+    )
+    
+    # Initialize model
+    config = ModelConfig(
+        version='1.0.0',
+        input_dim=X.shape[1],
+        hidden_dim=wandb.config.hidden_dim,
+        output_dim=1,
+        dropout_rate=wandb.config.dropout_rate,
+        n_heads=wandb.config.n_heads,
+        feature_layers=wandb.config.feature_layers,
+        learning_rate=wandb.config.learning_rate,
+        batch_size=wandb.config.batch_size,
+        device='cuda' if torch.cuda.is_available() else 'cpu'
+    )
+    
+    model = JambaThreatTransformerModel(config)
+    model = model.to(config.device)
+    
+    # Loss function and optimizer
+    criterion = torch.nn.BCEWithLogitsLoss()
+    optimizer = torch.optim.AdamW(model.parameters(), lr=config.learning_rate)
+    
+    # Training loop
+    best_val_loss = float('inf')
+    best_model_path = f'models/incidents_model_{datetime.now().strftime("%Y%m%d_%H%M%S")}/best_model.pt'
+    Path(best_model_path).parent.mkdir(parents=True, exist_ok=True)
+    
+    for epoch in range(wandb.config.epochs):
+        model.train()
+        train_loss = 0
+        train_correct = 0
+        train_total = 0
+        
+        for batch_idx, (data, target) in enumerate(train_loader):
+            data, target = data.to(config.device), target.to(config.device)
+            optimizer.zero_grad()
+            output = model(data)
+            loss = criterion(output.squeeze(), target)
+            loss.backward()
+            optimizer.step()
+            
+            train_loss += loss.item()
+            predicted = (output.squeeze() > 0).float()
+            train_correct += (predicted == target).sum().item()
+            train_total += target.size(0)
+            
+            if batch_idx % 10 == 0:
+                logger.info(f'Train Epoch: {epoch} [{batch_idx * len(data)}/{len(train_loader.dataset)} '
+                          f'({100. * batch_idx / len(train_loader):.0f}%)]\tLoss: {loss.item():.6f}')
+        
+        # Validation
+        model.eval()
+        val_loss = 0
+        val_correct = 0
+        val_total = 0
+        
+        with torch.no_grad():
+            for data, target in val_loader:
+                data, target = data.to(config.device), target.to(config.device)
+                output = model(data)
+                val_loss += criterion(output.squeeze(), target).item()
+                predicted = (output.squeeze() > 0).float()
+                val_correct += (predicted == target).sum().item()
+                val_total += target.size(0)
+        
+        train_loss /= len(train_loader)
+        train_acc = train_correct / train_total
+        val_loss /= len(val_loader)
+        val_acc = val_correct / val_total
+        
+        # Log metrics
+        wandb.log({
+            "train_loss": train_loss,
+            "train_acc": train_acc,
+            "val_loss": val_loss,
+            "val_acc": val_acc,
+            "epoch": epoch
+        })
+        
+        logger.info(f'Epoch {epoch}: Train Loss: {train_loss:.4f}, Train Acc: {train_acc:.4f}, '
+                   f'Val Loss: {val_loss:.4f}, Val Acc: {val_acc:.4f}')
+        
+        # Save best model
+        if val_loss < best_val_loss:
+            best_val_loss = val_loss
+            torch.save({
+                'epoch': epoch,
+                'model_state_dict': model.state_dict(),
+                'optimizer_state_dict': optimizer.state_dict(),
+                'val_loss': val_loss,
+                'config': config.__dict__
+            }, best_model_path)
+    
+    # Test best model
+    model.load_state_dict(torch.load(best_model_path)['model_state_dict'])
+    model.eval()
+    test_loss = 0
+    test_correct = 0
+    test_total = 0
+    
+    with torch.no_grad():
+        for data, target in test_loader:
+            data, target = data.to(config.device), target.to(config.device)
+            output = model(data)
+            test_loss += criterion(output.squeeze(), target).item()
+            predicted = (output.squeeze() > 0).float()
+            test_correct += (predicted == target).sum().item()
+            test_total += target.size(0)
+    
+    test_loss /= len(test_loader)
+    test_acc = test_correct / test_total
+    
+    logger.info(f'Final Test Loss: {test_loss:.4f}, Test Acc: {test_acc:.4f}')
+    wandb.log({
+        "test_loss": test_loss,
+        "test_acc": test_acc
+    })
+    
+    wandb.finish()
+
+if __name__ == '__main__':
+    train_model() 
